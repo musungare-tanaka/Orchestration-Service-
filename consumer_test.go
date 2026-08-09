@@ -61,16 +61,24 @@ func TestProcessDeliveryAcksAfterPublishingDeploySucceeded(t *testing.T) {
 	var published any
 	consumer := &DeployConsumer{
 		cfg: Config{
-			BaseDomain:                "apps.shiply.test",
-			NamespacePrefix:           "shiply-prj",
-			DefaultContainerPort:      8080,
-			RolloutTimeout:            time.Minute,
-			DeploySucceededRoutingKey: "deploy.succeeded",
+			DeploymentExchange:              "deployment.events",
+			RabbitMQExchange:                "shiply.services",
+			BaseDomain:                      "apps.shiply.test",
+			NamespacePrefix:                 "shiply-prj",
+			DefaultContainerPort:            8080,
+			RolloutTimeout:                  time.Minute,
+			DeploySucceededRoutingKey:       "deploy.succeeded",
+			OrchestrationStartedRoutingKey:  "orchestration.started",
+			OrchestrationDeployedRoutingKey: "orchestration.deployed",
+			OrchestrationRunningRoutingKey:  "orchestration.running",
 		},
 		deployer: manager,
-		publish: func(_ context.Context, routingKey string, event any) error {
-			if routingKey != "deploy.succeeded" {
-				t.Fatalf("unexpected routing key %q", routingKey)
+		publish: func(_ context.Context, exchange, routingKey string, event any) error {
+			if exchange == "deployment.events" {
+				return nil
+			}
+			if exchange != "shiply.services" || routingKey != "deploy.succeeded" {
+				t.Fatalf("unexpected publish target %q %q", exchange, routingKey)
 			}
 			published = event
 			return nil
@@ -114,17 +122,24 @@ func TestProcessDeliveryPublishesDeployFailureAndAcks(t *testing.T) {
 	var published any
 	consumer := &DeployConsumer{
 		cfg: Config{
-			BaseDomain:                "apps.shiply.test",
-			NamespacePrefix:           "shiply-prj",
-			DefaultContainerPort:      8080,
-			RolloutTimeout:            time.Minute,
-			DeployFailedRoutingKey:    "deploy.failed",
-			DeploySucceededRoutingKey: "deploy.succeeded",
+			DeploymentExchange:             "deployment.events",
+			RabbitMQExchange:               "shiply.services",
+			BaseDomain:                     "apps.shiply.test",
+			NamespacePrefix:                "shiply-prj",
+			DefaultContainerPort:           8080,
+			RolloutTimeout:                 time.Minute,
+			DeployFailedRoutingKey:         "deploy.failed",
+			DeploySucceededRoutingKey:      "deploy.succeeded",
+			OrchestrationStartedRoutingKey: "orchestration.started",
+			OrchestrationFailedRoutingKey:  "orchestration.failed",
 		},
 		deployer: manager,
-		publish: func(_ context.Context, routingKey string, event any) error {
-			if routingKey != "deploy.failed" {
-				t.Fatalf("unexpected routing key %q", routingKey)
+		publish: func(_ context.Context, exchange, routingKey string, event any) error {
+			if exchange == "deployment.events" {
+				return nil
+			}
+			if exchange != "shiply.services" || routingKey != "deploy.failed" {
+				t.Fatalf("unexpected publish target %q %q", exchange, routingKey)
 			}
 			published = event
 			return nil
@@ -167,14 +182,19 @@ func TestProcessDeliveryRequeuesWhenPublishingFails(t *testing.T) {
 
 	consumer := &DeployConsumer{
 		cfg: Config{
-			BaseDomain:                "apps.shiply.test",
-			NamespacePrefix:           "shiply-prj",
-			DefaultContainerPort:      8080,
-			RolloutTimeout:            time.Minute,
-			DeploySucceededRoutingKey: "deploy.succeeded",
+			DeploymentExchange:              "deployment.events",
+			RabbitMQExchange:                "shiply.services",
+			BaseDomain:                      "apps.shiply.test",
+			NamespacePrefix:                 "shiply-prj",
+			DefaultContainerPort:            8080,
+			RolloutTimeout:                  time.Minute,
+			DeploySucceededRoutingKey:       "deploy.succeeded",
+			OrchestrationStartedRoutingKey:  "orchestration.started",
+			OrchestrationDeployedRoutingKey: "orchestration.deployed",
+			OrchestrationRunningRoutingKey:  "orchestration.running",
 		},
 		deployer: manager,
-		publish: func(_ context.Context, _ string, _ any) error {
+		publish: func(_ context.Context, _ string, _ string, _ any) error {
 			return errors.New("rabbitmq unavailable")
 		},
 	}
@@ -216,12 +236,14 @@ func mustMarshalDeployRequest(t *testing.T) []byte {
 	t.Helper()
 
 	event := ServiceEvent[BuildSucceededPayload]{
-		EventID:   "event-1",
-		EventType: "build.succeeded",
-		Timestamp: json.RawMessage(`"2026-08-08T10:00:00Z"`),
-		ProjectID: "project-1",
-		ServiceID: "service-1",
-		UserID:    "user-1",
+		EventID:      "event-1",
+		EventType:    "build.succeeded",
+		Timestamp:    json.RawMessage(`"2026-08-08T10:00:00Z"`),
+		DeploymentID: "deployment-1",
+		ProjectID:    "project-1",
+		ServiceID:    "service-1",
+		ServiceName:  "Shiply API",
+		UserID:       "user-1",
 		Payload: BuildSucceededPayload{
 			ImageTag:      "ghcr.io/shiply/project/service:abc123",
 			CommitSHA:     "abc123",

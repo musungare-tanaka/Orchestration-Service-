@@ -12,7 +12,7 @@ import (
 	"github.com/rabbitmq/amqp091-go"
 )
 
-type publishFunc func(context.Context, string, any) error
+type publishFunc func(context.Context, string, string, any) error
 
 type deliveryAction struct {
 	ack     bool
@@ -29,6 +29,7 @@ type DeployConsumer struct {
 	cfg      Config
 	conn     *amqp091.Connection
 	ch       *amqp091.Channel
+	pub      *RabbitPublisher
 	deployer DeploymentManager
 	publish  publishFunc
 }
@@ -70,16 +71,30 @@ func NewDeployConsumer(cfg Config, deployer DeploymentManager) (*DeployConsumer,
 		return nil, fmt.Errorf("set qos: %w", err)
 	}
 
+	publisher, err := NewRabbitPublisher(conn, []ExchangeSpec{
+		{Name: cfg.RabbitMQExchange, Kind: "direct"},
+		{Name: cfg.DeploymentExchange, Kind: "topic"},
+	})
+	if err != nil {
+		ch.Close()
+		conn.Close()
+		return nil, fmt.Errorf("initialize publisher: %w", err)
+	}
+
 	return &DeployConsumer{
 		cfg:      cfg,
 		conn:     conn,
 		ch:       ch,
+		pub:      publisher,
 		deployer: deployer,
 		publish:  nil,
 	}, nil
 }
 
 func (c *DeployConsumer) Close() {
+	if c.pub != nil {
+		_ = c.pub.Close()
+	}
 	if c.ch != nil {
 		_ = c.ch.Close()
 	}
@@ -135,6 +150,12 @@ func (c *DeployConsumer) handleMessage(body []byte) (deliveryAction, error) {
 		return c.completeFailure(event, target, errors.New("missing imageTag in build.succeeded event"))
 	}
 
+	startedCtx, cancelStarted := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelStarted()
+	if err := c.publishEvent(startedCtx, c.cfg.DeploymentExchange, c.cfg.OrchestrationStartedRoutingKey, newOrchestrationStartedEvent(event)); err != nil {
+		return actionNackRequeue, fmt.Errorf("publish orchestration started event: %w", err)
+	}
+
 	applyCtx, cancelApply := context.WithTimeout(context.Background(), time.Minute)
 	defer cancelApply()
 
@@ -144,6 +165,10 @@ func (c *DeployConsumer) handleMessage(body []byte) (deliveryAction, error) {
 			return actionNackRequeue, fmt.Errorf("deploy resources: %w", err)
 		}
 		return c.completeFailure(event, target, err)
+	}
+
+	if err := c.publishEvent(applyCtx, c.cfg.DeploymentExchange, c.cfg.OrchestrationDeployedRoutingKey, newOrchestrationDeployedEvent(event, deployedTarget)); err != nil {
+		return actionNackRequeue, fmt.Errorf("publish orchestration deployed event: %w", err)
 	}
 
 	rolloutCtx, cancelRollout := context.WithTimeout(context.Background(), c.cfg.RolloutTimeout)
@@ -157,8 +182,11 @@ func (c *DeployConsumer) handleMessage(body []byte) (deliveryAction, error) {
 	}
 
 	successEvent := newDeploySucceededEvent(event, deployedTarget)
-	if err := c.publishEvent(rolloutCtx, c.cfg.DeploySucceededRoutingKey, successEvent); err != nil {
+	if err := c.publishEvent(rolloutCtx, c.cfg.RabbitMQExchange, c.cfg.DeploySucceededRoutingKey, successEvent); err != nil {
 		return actionNackRequeue, fmt.Errorf("publish deploy succeeded event: %w", err)
+	}
+	if err := c.publishEvent(rolloutCtx, c.cfg.DeploymentExchange, c.cfg.OrchestrationRunningRoutingKey, newOrchestrationRunningEvent(event, deployedTarget)); err != nil {
+		return actionNackRequeue, fmt.Errorf("publish orchestration running event: %w", err)
 	}
 
 	log.Printf("deployment succeeded for project=%s service=%s host=%s", event.ProjectID, event.ServiceID, deployedTarget.IngressHost)
@@ -174,39 +202,27 @@ func (c *DeployConsumer) completeFailure(
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	if err := c.publishEvent(ctx, c.cfg.DeployFailedRoutingKey, failureEvent); err != nil {
+	if err := c.publishEvent(ctx, c.cfg.RabbitMQExchange, c.cfg.DeployFailedRoutingKey, failureEvent); err != nil {
 		return actionNackRequeue, fmt.Errorf("%v; publish deploy failed event: %w", deployErr, err)
+	}
+	if err := c.publishEvent(ctx, c.cfg.DeploymentExchange, c.cfg.OrchestrationFailedRoutingKey, newOrchestrationFailedEvent(event, target, deployErr)); err != nil {
+		return actionNackRequeue, fmt.Errorf("%v; publish orchestration failed event: %w", deployErr, err)
 	}
 
 	return actionAck, deployErr
 }
 
-func (c *DeployConsumer) publishEvent(ctx context.Context, routingKey string, event any) error {
+func (c *DeployConsumer) publishEvent(ctx context.Context, exchange, routingKey string, event any) error {
 	publish := c.publish
 	if publish == nil {
 		publish = c.publishJSONEvent
 	}
-	return publish(ctx, routingKey, event)
+	return publish(ctx, exchange, routingKey, event)
 }
 
-func (c *DeployConsumer) publishJSONEvent(ctx context.Context, routingKey string, event any) error {
-	if c.ch == nil {
-		return errors.New("rabbitmq channel is not initialized")
+func (c *DeployConsumer) publishJSONEvent(ctx context.Context, exchange, routingKey string, event any) error {
+	if c.pub == nil {
+		return errors.New("rabbitmq publisher is not initialized")
 	}
-
-	body, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("marshal event payload: %w", err)
-	}
-
-	if err := c.ch.PublishWithContext(ctx, c.cfg.RabbitMQExchange, routingKey, false, false, amqp091.Publishing{
-		ContentType:  "application/json",
-		DeliveryMode: amqp091.Persistent,
-		Timestamp:    time.Now().UTC(),
-		Body:         body,
-	}); err != nil {
-		return fmt.Errorf("publish rabbitmq event: %w", err)
-	}
-
-	return nil
+	return c.pub.PublishJSON(ctx, exchange, routingKey, event)
 }

@@ -17,7 +17,9 @@ type DeploymentTarget struct {
 type DeployRequest struct {
 	ProjectID     string
 	ServiceID     string
+	ServiceName   string
 	UserID        string
+	DeploymentID  string
 	ImageTag      string
 	CommitSHA     string
 	ProjectSlug   string
@@ -34,7 +36,9 @@ func deployRequestFromEvent(cfg Config, event ServiceEvent[BuildSucceededPayload
 	return DeployRequest{
 		ProjectID:     event.ProjectID,
 		ServiceID:     event.ServiceID,
+		ServiceName:   firstNonEmpty(event.ServiceName, event.ServiceID),
 		UserID:        event.UserID,
+		DeploymentID:  event.DeploymentID,
 		ImageTag:      strings.TrimSpace(event.Payload.ImageTag),
 		CommitSHA:     strings.TrimSpace(event.Payload.CommitSHA),
 		ProjectSlug:   firstNonEmpty(event.Payload.ProjectSlug, event.ProjectID),

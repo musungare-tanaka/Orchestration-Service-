@@ -8,18 +8,28 @@ import (
 )
 
 const (
-	deploySucceededEventType = "deploy.succeeded"
-	deployFailedEventType    = "deploy.failed"
+	deploySucceededEventType            = "deploy.succeeded"
+	deployFailedEventType               = "deploy.failed"
+	deploymentOrchestrationStartedType  = "deployment.orchestration.started"
+	deploymentOrchestrationDeployedType = "deployment.orchestration.deployed"
+	deploymentOrchestrationRunningType  = "deployment.orchestration.running"
+	deploymentOrchestrationFailedType   = "deployment.orchestration.failed"
+	orchestrationStatus                 = "ORCHESTRATING"
+	deployedStatus                      = "DEPLOYED"
+	runningStatus                       = "RUNNING"
+	deployFailedStatus                  = "DEPLOY_FAILED"
 )
 
 type ServiceEvent[T any] struct {
-	EventID   string          `json:"eventId"`
-	EventType string          `json:"eventType"`
-	Timestamp json.RawMessage `json:"timestamp"`
-	ProjectID string          `json:"projectId"`
-	ServiceID string          `json:"serviceId"`
-	UserID    string          `json:"userId"`
-	Payload   T               `json:"payload"`
+	EventID      string          `json:"eventId"`
+	EventType    string          `json:"eventType"`
+	Timestamp    json.RawMessage `json:"timestamp"`
+	DeploymentID string          `json:"deploymentId,omitempty"`
+	ProjectID    string          `json:"projectId"`
+	ServiceID    string          `json:"serviceId"`
+	ServiceName  string          `json:"serviceName,omitempty"`
+	UserID       string          `json:"userId"`
+	Payload      T               `json:"payload"`
 }
 
 type BuildSucceededPayload struct {
@@ -29,6 +39,17 @@ type BuildSucceededPayload struct {
 	ProjectSlug   string `json:"projectSlug,omitempty"`
 	ServiceSlug   string `json:"serviceSlug,omitempty"`
 	ContainerPort int32  `json:"containerPort,omitempty"`
+}
+
+type DeploymentEvent struct {
+	EventID      string         `json:"eventId"`
+	DeploymentID string         `json:"deploymentId"`
+	ProjectID    string         `json:"projectId"`
+	ServiceName  string         `json:"serviceName"`
+	EventType    string         `json:"eventType"`
+	Status       string         `json:"status"`
+	Timestamp    time.Time      `json:"timestamp"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
 }
 
 type DeploySucceededPayload struct {
@@ -56,12 +77,14 @@ func newDeploySucceededEvent(
 	target DeploymentTarget,
 ) ServiceEvent[DeploySucceededPayload] {
 	return ServiceEvent[DeploySucceededPayload]{
-		EventID:   newEventID(),
-		EventType: deploySucceededEventType,
-		Timestamp: marshalTimestamp(time.Now().UTC()),
-		ProjectID: request.ProjectID,
-		ServiceID: request.ServiceID,
-		UserID:    request.UserID,
+		EventID:      newEventID(),
+		EventType:    deploySucceededEventType,
+		Timestamp:    marshalTimestamp(time.Now().UTC()),
+		DeploymentID: request.DeploymentID,
+		ProjectID:    request.ProjectID,
+		ServiceID:    request.ServiceID,
+		ServiceName:  request.ServiceName,
+		UserID:       request.UserID,
 		Payload: DeploySucceededPayload{
 			ImageTag:       request.Payload.ImageTag,
 			CommitSHA:      request.Payload.CommitSHA,
@@ -80,12 +103,14 @@ func newDeployFailedEvent(
 	err error,
 ) ServiceEvent[DeployFailedPayload] {
 	return ServiceEvent[DeployFailedPayload]{
-		EventID:   newEventID(),
-		EventType: deployFailedEventType,
-		Timestamp: marshalTimestamp(time.Now().UTC()),
-		ProjectID: request.ProjectID,
-		ServiceID: request.ServiceID,
-		UserID:    request.UserID,
+		EventID:      newEventID(),
+		EventType:    deployFailedEventType,
+		Timestamp:    marshalTimestamp(time.Now().UTC()),
+		DeploymentID: request.DeploymentID,
+		ProjectID:    request.ProjectID,
+		ServiceID:    request.ServiceID,
+		ServiceName:  request.ServiceName,
+		UserID:       request.UserID,
 		Payload: DeployFailedPayload{
 			ImageTag:       request.Payload.ImageTag,
 			CommitSHA:      request.Payload.CommitSHA,
@@ -94,6 +119,105 @@ func newDeployFailedEvent(
 			IngressHost:    target.IngressHost,
 			ContainerPort:  target.ContainerPort,
 			ErrorMessage:   err.Error(),
+		},
+	}
+}
+
+func newOrchestrationStartedEvent(
+	request ServiceEvent[BuildSucceededPayload],
+) DeploymentEvent {
+	return DeploymentEvent{
+		EventID:      newEventID(),
+		DeploymentID: request.DeploymentID,
+		ProjectID:    request.ProjectID,
+		ServiceName:  request.ServiceName,
+		EventType:    deploymentOrchestrationStartedType,
+		Status:       orchestrationStatus,
+		Timestamp:    time.Now().UTC(),
+		Metadata: map[string]any{
+			"serviceId":     request.ServiceID,
+			"imageTag":      request.Payload.ImageTag,
+			"commitSha":     request.Payload.CommitSHA,
+			"projectSlug":   request.Payload.ProjectSlug,
+			"serviceSlug":   request.Payload.ServiceSlug,
+			"containerPort": request.Payload.ContainerPort,
+		},
+	}
+}
+
+func newOrchestrationDeployedEvent(
+	request ServiceEvent[BuildSucceededPayload],
+	target DeploymentTarget,
+) DeploymentEvent {
+	return DeploymentEvent{
+		EventID:      newEventID(),
+		DeploymentID: request.DeploymentID,
+		ProjectID:    request.ProjectID,
+		ServiceName:  request.ServiceName,
+		EventType:    deploymentOrchestrationDeployedType,
+		Status:       deployedStatus,
+		Timestamp:    time.Now().UTC(),
+		Metadata: map[string]any{
+			"serviceId":             request.ServiceID,
+			"imageTag":              request.Payload.ImageTag,
+			"commitSha":             request.Payload.CommitSHA,
+			"namespace":             target.Namespace,
+			"deploymentName":        target.DeploymentName,
+			"kubernetesServiceName": target.ServiceName,
+			"ingressHost":           target.IngressHost,
+			"containerPort":         target.ContainerPort,
+		},
+	}
+}
+
+func newOrchestrationRunningEvent(
+	request ServiceEvent[BuildSucceededPayload],
+	target DeploymentTarget,
+) DeploymentEvent {
+	return DeploymentEvent{
+		EventID:      newEventID(),
+		DeploymentID: request.DeploymentID,
+		ProjectID:    request.ProjectID,
+		ServiceName:  request.ServiceName,
+		EventType:    deploymentOrchestrationRunningType,
+		Status:       runningStatus,
+		Timestamp:    time.Now().UTC(),
+		Metadata: map[string]any{
+			"serviceId":             request.ServiceID,
+			"imageTag":              request.Payload.ImageTag,
+			"commitSha":             request.Payload.CommitSHA,
+			"namespace":             target.Namespace,
+			"deploymentName":        target.DeploymentName,
+			"kubernetesServiceName": target.ServiceName,
+			"ingressHost":           target.IngressHost,
+			"containerPort":         target.ContainerPort,
+		},
+	}
+}
+
+func newOrchestrationFailedEvent(
+	request ServiceEvent[BuildSucceededPayload],
+	target DeploymentTarget,
+	err error,
+) DeploymentEvent {
+	return DeploymentEvent{
+		EventID:      newEventID(),
+		DeploymentID: request.DeploymentID,
+		ProjectID:    request.ProjectID,
+		ServiceName:  request.ServiceName,
+		EventType:    deploymentOrchestrationFailedType,
+		Status:       deployFailedStatus,
+		Timestamp:    time.Now().UTC(),
+		Metadata: map[string]any{
+			"serviceId":             request.ServiceID,
+			"imageTag":              request.Payload.ImageTag,
+			"commitSha":             request.Payload.CommitSHA,
+			"namespace":             target.Namespace,
+			"deploymentName":        target.DeploymentName,
+			"kubernetesServiceName": target.ServiceName,
+			"ingressHost":           target.IngressHost,
+			"containerPort":         target.ContainerPort,
+			"errorMessage":          err.Error(),
 		},
 	}
 }
