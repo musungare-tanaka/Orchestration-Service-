@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"time"
@@ -127,7 +128,7 @@ func newOrchestrationStartedEvent(
 	request ServiceEvent[BuildSucceededPayload],
 ) DeploymentEvent {
 	return DeploymentEvent{
-		EventID:      newEventID(),
+		EventID:      deploymentEventID(request.DeploymentID, "orchestration", orchestrationStatus),
 		DeploymentID: request.DeploymentID,
 		ProjectID:    request.ProjectID,
 		ServiceName:  request.ServiceName,
@@ -150,7 +151,7 @@ func newOrchestrationDeployedEvent(
 	target DeploymentTarget,
 ) DeploymentEvent {
 	return DeploymentEvent{
-		EventID:      newEventID(),
+		EventID:      deploymentEventID(request.DeploymentID, "orchestration", deployedStatus),
 		DeploymentID: request.DeploymentID,
 		ProjectID:    request.ProjectID,
 		ServiceName:  request.ServiceName,
@@ -166,6 +167,7 @@ func newOrchestrationDeployedEvent(
 			"kubernetesServiceName": target.ServiceName,
 			"ingressHost":           target.IngressHost,
 			"containerPort":         target.ContainerPort,
+			"tlsEnabled":            target.TLSEnabled,
 		},
 	}
 }
@@ -175,7 +177,7 @@ func newOrchestrationRunningEvent(
 	target DeploymentTarget,
 ) DeploymentEvent {
 	return DeploymentEvent{
-		EventID:      newEventID(),
+		EventID:      deploymentEventID(request.DeploymentID, "orchestration", runningStatus),
 		DeploymentID: request.DeploymentID,
 		ProjectID:    request.ProjectID,
 		ServiceName:  request.ServiceName,
@@ -191,6 +193,7 @@ func newOrchestrationRunningEvent(
 			"kubernetesServiceName": target.ServiceName,
 			"ingressHost":           target.IngressHost,
 			"containerPort":         target.ContainerPort,
+			"tlsEnabled":            target.TLSEnabled,
 		},
 	}
 }
@@ -201,7 +204,7 @@ func newOrchestrationFailedEvent(
 	err error,
 ) DeploymentEvent {
 	return DeploymentEvent{
-		EventID:      newEventID(),
+		EventID:      deploymentEventID(request.DeploymentID, "orchestration", deployFailedStatus),
 		DeploymentID: request.DeploymentID,
 		ProjectID:    request.ProjectID,
 		ServiceName:  request.ServiceName,
@@ -217,9 +220,15 @@ func newOrchestrationFailedEvent(
 			"kubernetesServiceName": target.ServiceName,
 			"ingressHost":           target.IngressHost,
 			"containerPort":         target.ContainerPort,
+			"tlsEnabled":            target.TLSEnabled,
 			"errorMessage":          err.Error(),
 		},
 	}
+}
+
+func deploymentEventID(deploymentID, stage, status string) string {
+	sum := sha256.Sum256([]byte(deploymentID + ":" + stage + ":" + status))
+	return hex.EncodeToString(sum[:])
 }
 
 func marshalTimestamp(timestamp time.Time) json.RawMessage {

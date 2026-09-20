@@ -12,6 +12,7 @@ type DeploymentTarget struct {
 	IngressName    string
 	IngressHost    string
 	ContainerPort  int32
+	TLSEnabled     bool
 }
 
 type DeployRequest struct {
@@ -62,6 +63,7 @@ func targetForRequest(cfg Config, request DeployRequest) (DeploymentTarget, erro
 		IngressName:    buildResourceName("app", serviceSlug),
 		IngressHost:    host,
 		ContainerPort:  request.ContainerPort,
+		TLSEnabled:     cfg.TLSSecretName != "",
 	}, nil
 }
 
