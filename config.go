@@ -33,6 +33,14 @@ type Config struct {
 	OrchestrationDeployedRoutingKey string
 	OrchestrationRunningRoutingKey  string
 	OrchestrationFailedRoutingKey   string
+	OrchestrationRetryingRoutingKey string
+	DatabaseURL                     string
+	LedgerSchema                    string
+	LeaseDuration                   time.Duration
+	MaxAttempts                     int
+	RetryBackoffs                   []time.Duration
+	RetryQueuePrefix                string
+	DLQ                             string
 	KubeconfigPath                  string
 	BaseDomain                      string
 	IngressClassName                string
@@ -64,6 +72,14 @@ func loadConfig() Config {
 		OrchestrationDeployedRoutingKey: envOrDefault("RABBITMQ_ORCHESTRATION_DEPLOYED_ROUTING_KEY", deploymentOrchestrationDeployedType),
 		OrchestrationRunningRoutingKey:  envOrDefault("RABBITMQ_ORCHESTRATION_RUNNING_ROUTING_KEY", deploymentOrchestrationRunningType),
 		OrchestrationFailedRoutingKey:   envOrDefault("RABBITMQ_ORCHESTRATION_FAILED_ROUTING_KEY", deploymentOrchestrationFailedType),
+		OrchestrationRetryingRoutingKey: envOrDefault("RABBITMQ_ORCHESTRATION_RETRYING_ROUTING_KEY", "deployment.orchestration.retrying"),
+		DatabaseURL:                     strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		LedgerSchema:                    envOrDefault("STAGE_LEDGER_SCHEMA", "orchestration_service"),
+		LeaseDuration:                   envDurationOrDefault("STAGE_LEASE_DURATION", rolloutTimeout+2*time.Minute),
+		MaxAttempts:                     int(envInt32OrDefault("MAX_DELIVERY_ATTEMPTS", 5)),
+		RetryBackoffs:                   envDurationsOrDefault("RETRY_BACKOFF_SCHEDULE", []time.Duration{10 * time.Second, 30 * time.Second, 2 * time.Minute, 5 * time.Minute}),
+		RetryQueuePrefix:                envOrDefault("RABBITMQ_RETRY_QUEUE_PREFIX", "shiply.app.deploy.retry"),
+		DLQ:                             envOrDefault("RABBITMQ_DEPLOY_DLQ", "shiply.app.deploy.dlq"),
 		KubeconfigPath:                  os.Getenv("KUBECONFIG"),
 		BaseDomain:                      strings.TrimSpace(os.Getenv("PLATFORM_BASE_DOMAIN")),
 		IngressClassName:                envOrDefault("K8S_INGRESS_CLASS", "traefik"),
@@ -87,6 +103,23 @@ func loadConfig() Config {
 			Password: os.Getenv("CONTAINER_REGISTRY_PASSWORD"),
 		},
 	}
+}
+
+func envDurationsOrDefault(key string, fallback []time.Duration) []time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parts := strings.Split(value, ",")
+	out := make([]time.Duration, 0, len(parts))
+	for _, part := range parts {
+		d, e := time.ParseDuration(strings.TrimSpace(part))
+		if e != nil || d <= 0 {
+			return fallback
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 func envOrDefault(key, fallback string) string {

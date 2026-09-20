@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -19,6 +20,7 @@ const (
 	deployedStatus                      = "DEPLOYED"
 	runningStatus                       = "RUNNING"
 	deployFailedStatus                  = "DEPLOY_FAILED"
+	deployRetryingStatus                = "DEPLOY_RETRYING"
 )
 
 type ServiceEvent[T any] struct {
@@ -73,12 +75,16 @@ type DeployFailedPayload struct {
 	ErrorMessage   string `json:"errorMessage"`
 }
 
+func newOrchestrationRetryingEvent(request ServiceEvent[BuildSucceededPayload], attempt int, err error) DeploymentEvent {
+	return DeploymentEvent{EventID: deploymentEventID(request.DeploymentID, "orchestrate", fmt.Sprintf("%s:%d", deployRetryingStatus, attempt)), DeploymentID: request.DeploymentID, ProjectID: request.ProjectID, ServiceName: request.ServiceName, EventType: "deployment.orchestration.retrying", Status: deployRetryingStatus, Timestamp: time.Now().UTC(), Metadata: map[string]any{"serviceId": request.ServiceID, "attempt": attempt, "errorMessage": err.Error()}}
+}
+
 func newDeploySucceededEvent(
 	request ServiceEvent[BuildSucceededPayload],
 	target DeploymentTarget,
 ) ServiceEvent[DeploySucceededPayload] {
 	return ServiceEvent[DeploySucceededPayload]{
-		EventID:      newEventID(),
+		EventID:      deploymentEventID(request.DeploymentID, "orchestrate", runningStatus),
 		EventType:    deploySucceededEventType,
 		Timestamp:    marshalTimestamp(time.Now().UTC()),
 		DeploymentID: request.DeploymentID,
@@ -104,7 +110,7 @@ func newDeployFailedEvent(
 	err error,
 ) ServiceEvent[DeployFailedPayload] {
 	return ServiceEvent[DeployFailedPayload]{
-		EventID:      newEventID(),
+		EventID:      deploymentEventID(request.DeploymentID, "orchestrate", deployFailedStatus),
 		EventType:    deployFailedEventType,
 		Timestamp:    marshalTimestamp(time.Now().UTC()),
 		DeploymentID: request.DeploymentID,

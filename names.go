@@ -87,11 +87,12 @@ func buildIngressHost(serviceSlug, projectSlug, baseDomain string) (string, erro
 
 func labelsForRequest(request DeployRequest) map[string]string {
 	return map[string]string{
-		"shiply.io/managed-by":   "orchestration-service",
-		"shiply.io/project-id":   request.ProjectID,
-		"shiply.io/project-slug": sanitizeDNSLabel(request.ProjectSlug, "project"),
-		"shiply.io/service-id":   request.ServiceID,
-		"shiply.io/service-slug": sanitizeDNSLabel(request.ServiceSlug, "service"),
+		"shiply.io/managed-by":    "orchestration-service",
+		"shiply.io/deployment-id": request.DeploymentID,
+		"shiply.io/project-id":    request.ProjectID,
+		"shiply.io/project-slug":  sanitizeDNSLabel(request.ProjectSlug, "project"),
+		"shiply.io/service-id":    request.ServiceID,
+		"shiply.io/service-slug":  sanitizeDNSLabel(request.ServiceSlug, "service"),
 	}
 }
 

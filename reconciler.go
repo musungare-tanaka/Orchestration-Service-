@@ -16,6 +16,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
+type ownershipError struct{ message string }
+
+func (e ownershipError) Error() string { return e.message }
+
 func (k *KubernetesClient) Deploy(ctx context.Context, request DeployRequest) (DeploymentTarget, error) {
 	target, err := targetForRequest(k.cfg, request)
 	if err != nil {
@@ -53,6 +57,9 @@ func (k *KubernetesClient) ensureNamespace(ctx context.Context, namespace string
 
 	current, err := namespaces.Get(ctx, namespace, metav1.GetOptions{})
 	if err == nil {
+		if current.Labels["shiply.io/managed-by"] != labels["shiply.io/managed-by"] || current.Labels["shiply.io/project-id"] != labels["shiply.io/project-id"] {
+			return ownershipError{message: fmt.Sprintf("refusing to update namespace %s: ownership labels do not match request", namespace)}
+		}
 		if current.Labels == nil {
 			current.Labels = map[string]string{}
 		}

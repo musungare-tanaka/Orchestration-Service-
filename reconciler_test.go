@@ -110,7 +110,7 @@ func TestDeployUpdatesExistingResourcesIdempotently(t *testing.T) {
 	}
 
 	existing := []runtime.Object{
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shiply-prj-demo"}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shiply-prj-demo", Labels: map[string]string{"shiply.io/managed-by": "orchestration-service", "shiply.io/project-id": "project-1"}}},
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "app-api", Namespace: "shiply-prj-demo"}},
 		&corev1.Service{
 			ObjectMeta: metav1.ObjectMeta{Name: "app-api", Namespace: "shiply-prj-demo"},
