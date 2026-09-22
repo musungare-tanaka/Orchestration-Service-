@@ -25,6 +25,8 @@ var (
 	actionNackRequeue = deliveryAction{requeue: true}
 )
 
+var errOrchestrationLeaseBusy = errors.New("orchestration stage lease is owned by another worker")
+
 type DeployConsumer struct {
 	cfg      Config
 	conn     *amqp091.Connection
@@ -152,7 +154,7 @@ func (c *DeployConsumer) processDelivery(msg amqp091.Delivery) {
 	}
 
 	if action.requeue && c.ch != nil {
-		if retryErr := c.scheduleRetry(msg, err); retryErr == nil {
+		if retryErr := c.scheduleRetry(msg, err, !errors.Is(err, errOrchestrationLeaseBusy)); retryErr == nil {
 			_ = msg.Ack(false)
 			return
 		}
@@ -187,7 +189,7 @@ func (c *DeployConsumer) handleMessage(body []byte) (deliveryAction, error) {
 		return actionNackDrop, errors.New("missing imageTag in build.succeeded event")
 	}
 	if c.ledger != nil {
-		disposition, record, err := c.ledger.Claim(context.Background(), event.DeploymentID, "orchestrate", c.cfg.LeaseDuration)
+		disposition, record, err := c.ledger.Claim(context.Background(), event.DeploymentID, "orchestration", c.cfg.LeaseDuration)
 		if err != nil {
 			return actionNackRequeue, fmt.Errorf("claim orchestration stage: %w", err)
 		}
@@ -195,7 +197,7 @@ func (c *DeployConsumer) handleMessage(body []byte) (deliveryAction, error) {
 		case ClaimCompleted, ClaimFailed:
 			return c.publishStored(record.ResultJSON)
 		case ClaimBusy:
-			return actionNackRequeue, errors.New("orchestration stage lease is owned by another worker")
+			return actionNackRequeue, errOrchestrationLeaseBusy
 		}
 	}
 
@@ -239,7 +241,7 @@ func (c *DeployConsumer) handleMessage(body []byte) (deliveryAction, error) {
 		return actionNackRequeue, err
 	}
 	if c.ledger != nil {
-		if err := c.ledger.Complete(rolloutCtx, event.DeploymentID, "orchestrate", bundle); err != nil {
+		if err := c.ledger.Complete(rolloutCtx, event.DeploymentID, "orchestration", bundle); err != nil {
 			return actionNackRequeue, fmt.Errorf("persist orchestration result: %w", err)
 		}
 	}
@@ -268,7 +270,7 @@ func (c *DeployConsumer) completeFailure(
 		if err != nil {
 			return actionNackRequeue, err
 		}
-		if err := c.ledger.Fail(ctx, event.DeploymentID, "orchestrate", bundle); err != nil {
+		if err := c.ledger.Fail(ctx, event.DeploymentID, "orchestration", bundle); err != nil {
 			return actionNackRequeue, fmt.Errorf("persist deploy failure: %w", err)
 		}
 	}
@@ -330,7 +332,7 @@ func (c *DeployConsumer) startLeaseRenewal(id string) func() {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				_ = c.ledger.Renew(ctx, id, "orchestrate", c.cfg.LeaseDuration)
+				_ = c.ledger.Renew(ctx, id, "orchestration", c.cfg.LeaseDuration)
 			}
 		}
 	}()
@@ -349,23 +351,44 @@ func declareDeployRetryTopology(ch *amqp091.Channel, cfg Config) error {
 	}
 	return nil
 }
-func (c *DeployConsumer) scheduleRetry(msg amqp091.Delivery, cause error) error {
-	attempt := deployHeaderAttempt(msg.Headers) + 1
+func (c *DeployConsumer) scheduleRetry(msg amqp091.Delivery, cause error, countAttempt bool) error {
+	attempt := deployHeaderAttempt(msg.Headers)
+	if countAttempt {
+		attempt++
+	}
 	if attempt >= c.cfg.MaxAttempts {
-		_ = c.emitExhausted(msg.Body, cause)
+		if err := c.emitExhausted(msg.Body, cause); err != nil {
+			return err
+		}
 		return c.copyToDLQAttempt(msg, cause, attempt)
 	}
-	idx := attempt - 1
+	idx := attempt
+	if idx > 0 {
+		idx--
+	}
 	if idx >= len(c.cfg.RetryBackoffs) {
 		idx = len(c.cfg.RetryBackoffs) - 1
 	}
-	_ = c.emitRetrying(msg.Body, attempt, cause)
+	if countAttempt {
+		if err := c.emitRetrying(msg.Body, attempt, cause); err != nil {
+			return err
+		}
+	}
 	h := deployCloneHeaders(msg.Headers)
 	h["x-shiply-attempt"] = int32(attempt)
 	h["x-shiply-retry-reason"] = deployReason(cause)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	return c.ch.PublishWithContext(ctx, "", fmt.Sprintf("%s.%d", c.cfg.RetryQueuePrefix, idx+1), false, false, amqp091.Publishing{ContentType: msg.ContentType, DeliveryMode: amqp091.Persistent, Headers: h, Body: msg.Body})
+	if c.pub == nil {
+		return errors.New("rabbitmq publisher is not initialized")
+	}
+	if err := c.pub.Publish(ctx, "", fmt.Sprintf("%s.%d", c.cfg.RetryQueuePrefix, idx+1), amqp091.Publishing{ContentType: msg.ContentType, DeliveryMode: amqp091.Persistent, Headers: h, Body: msg.Body}); err != nil {
+		return err
+	}
+	if countAttempt {
+		return c.releaseClaim(ctx, msg.Body)
+	}
+	return nil
 }
 func (c *DeployConsumer) copyToDLQ(msg amqp091.Delivery, e error) error {
 	return c.copyToDLQAttempt(msg, e, deployHeaderAttempt(msg.Headers))
@@ -376,7 +399,21 @@ func (c *DeployConsumer) copyToDLQAttempt(msg amqp091.Delivery, e error, a int) 
 	h["x-shiply-attempt"] = int32(a)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	return c.ch.PublishWithContext(ctx, "", c.cfg.DLQ, false, false, amqp091.Publishing{ContentType: msg.ContentType, DeliveryMode: amqp091.Persistent, Headers: h, Body: msg.Body})
+	if c.pub == nil {
+		return errors.New("rabbitmq publisher is not initialized")
+	}
+	return c.pub.Publish(ctx, "", c.cfg.DLQ, amqp091.Publishing{ContentType: msg.ContentType, DeliveryMode: amqp091.Persistent, Headers: h, Body: msg.Body})
+}
+
+func (c *DeployConsumer) releaseClaim(ctx context.Context, body []byte) error {
+	if c.ledger == nil {
+		return nil
+	}
+	var event ServiceEvent[BuildSucceededPayload]
+	if err := json.Unmarshal(body, &event); err != nil {
+		return err
+	}
+	return c.ledger.Release(ctx, event.DeploymentID, "orchestration")
 }
 func deployHeaderAttempt(h amqp091.Table) int {
 	switch v := h["x-shiply-attempt"].(type) {
@@ -422,8 +459,11 @@ func (c *DeployConsumer) emitExhausted(body []byte, cause error) error {
 		return nil
 	}
 	target, _ := targetForRequest(c.cfg, deployRequestFromEvent(c.cfg, e))
-	_, err := c.completeFailure(e, target, fmt.Errorf("retry attempts exhausted: %w", cause))
-	return err
+	action, err := c.completeFailure(e, target, fmt.Errorf("retry attempts exhausted: %w", cause))
+	if !action.ack {
+		return err
+	}
+	return nil
 }
 
 func (c *DeployConsumer) publishProgressEvent(ctx context.Context, exchange, routingKey string, event any) error {

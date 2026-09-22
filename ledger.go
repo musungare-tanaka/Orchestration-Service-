@@ -33,7 +33,7 @@ type StageRecord struct {
 	Stage          string
 	State          StageState
 	Attempt        int
-	LeaseExpiresAt time.Time
+	LeaseExpiresAt sql.NullTime
 	ResultJSON     json.RawMessage
 }
 type StageLedger interface {
@@ -41,6 +41,7 @@ type StageLedger interface {
 	Renew(context.Context, string, string, time.Duration) error
 	Complete(context.Context, string, string, any) error
 	Fail(context.Context, string, string, any) error
+	Release(context.Context, string, string) error
 	Close() error
 }
 type PostgresStageLedger struct {
@@ -75,17 +76,20 @@ func (l *PostgresStageLedger) Claim(ctx context.Context, id, stage string, d tim
 		return 0, StageRecord{}, e
 	}
 	defer tx.Rollback()
-	var r StageRecord
-	e = tx.QueryRowContext(ctx, `SELECT deployment_id,stage,state,attempt,lease_expires_at,result_json FROM `+l.table+` WHERE deployment_id=$1 AND stage=$2 FOR UPDATE`, id, stage).Scan(&r.DeploymentID, &r.Stage, &r.State, &r.Attempt, &r.LeaseExpiresAt, &r.ResultJSON)
 	now := time.Now().UTC()
-	if errors.Is(e, sql.ErrNoRows) {
-		r = StageRecord{DeploymentID: id, Stage: stage, State: StateInProgress, Attempt: 1, LeaseExpiresAt: now.Add(d)}
-		_, e = tx.ExecContext(ctx, `INSERT INTO `+l.table+`(deployment_id,stage,state,attempt,lease_expires_at)VALUES($1,$2,$3,1,$4)`, id, stage, StateInProgress, r.LeaseExpiresAt)
-		if e != nil {
-			return 0, r, e
-		}
+	leaseExpiresAt := now.Add(d)
+	result, e := tx.ExecContext(ctx, `INSERT INTO `+l.table+`(deployment_id,stage,state,attempt,lease_expires_at)VALUES($1,$2,$3,1,$4) ON CONFLICT DO NOTHING`, id, stage, StateInProgress, leaseExpiresAt)
+	if e != nil {
+		return 0, StageRecord{}, e
+	}
+	if inserted, e := result.RowsAffected(); e != nil {
+		return 0, StageRecord{}, e
+	} else if inserted == 1 {
+		r := StageRecord{DeploymentID: id, Stage: stage, State: StateInProgress, Attempt: 1, LeaseExpiresAt: sql.NullTime{Time: leaseExpiresAt, Valid: true}}
 		return ClaimAcquired, r, tx.Commit()
 	}
+	var r StageRecord
+	e = tx.QueryRowContext(ctx, `SELECT deployment_id,stage,state,attempt,lease_expires_at,result_json FROM `+l.table+` WHERE deployment_id=$1 AND stage=$2 FOR UPDATE`, id, stage).Scan(&r.DeploymentID, &r.Stage, &r.State, &r.Attempt, &r.LeaseExpiresAt, &r.ResultJSON)
 	if e != nil {
 		return 0, r, e
 	}
@@ -95,12 +99,12 @@ func (l *PostgresStageLedger) Claim(ctx context.Context, id, stage string, d tim
 	if r.State == StateFailed {
 		return ClaimFailed, r, tx.Commit()
 	}
-	if r.LeaseExpiresAt.After(now) {
+	if r.LeaseExpiresAt.Valid && r.LeaseExpiresAt.Time.After(now) {
 		return ClaimBusy, r, tx.Commit()
 	}
 	r.Attempt++
-	r.LeaseExpiresAt = now.Add(d)
-	_, e = tx.ExecContext(ctx, `UPDATE `+l.table+` SET state=$3,attempt=$4,lease_expires_at=$5,updated_at=now() WHERE deployment_id=$1 AND stage=$2`, id, stage, StateInProgress, r.Attempt, r.LeaseExpiresAt)
+	r.LeaseExpiresAt = sql.NullTime{Time: now.Add(d), Valid: true}
+	_, e = tx.ExecContext(ctx, `UPDATE `+l.table+` SET state=$3,attempt=$4,lease_expires_at=$5,updated_at=now() WHERE deployment_id=$1 AND stage=$2`, id, stage, StateInProgress, r.Attempt, r.LeaseExpiresAt.Time)
 	if e != nil {
 		return 0, r, e
 	}
@@ -123,4 +127,8 @@ func (l *PostgresStageLedger) Complete(ctx context.Context, id, stage string, v 
 }
 func (l *PostgresStageLedger) Fail(ctx context.Context, id, stage string, v any) error {
 	return l.set(ctx, id, stage, StateFailed, v)
+}
+func (l *PostgresStageLedger) Release(ctx context.Context, id, stage string) error {
+	_, e := l.db.ExecContext(ctx, `UPDATE `+l.table+` SET state=$3,lease_expires_at=NULL,updated_at=now() WHERE deployment_id=$1 AND stage=$2`, id, stage, StateInProgress)
+	return e
 }

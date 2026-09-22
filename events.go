@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -76,7 +75,7 @@ type DeployFailedPayload struct {
 }
 
 func newOrchestrationRetryingEvent(request ServiceEvent[BuildSucceededPayload], attempt int, err error) DeploymentEvent {
-	return DeploymentEvent{EventID: deploymentEventID(request.DeploymentID, "orchestrate", fmt.Sprintf("%s:%d", deployRetryingStatus, attempt)), DeploymentID: request.DeploymentID, ProjectID: request.ProjectID, ServiceName: request.ServiceName, EventType: "deployment.orchestration.retrying", Status: deployRetryingStatus, Timestamp: time.Now().UTC(), Metadata: map[string]any{"serviceId": request.ServiceID, "attempt": attempt, "errorMessage": err.Error()}}
+	return DeploymentEvent{EventID: deploymentEventID(request.DeploymentID, "orchestration", fmt.Sprintf("%s:%d", deployRetryingStatus, attempt)), DeploymentID: request.DeploymentID, ProjectID: request.ProjectID, ServiceName: request.ServiceName, EventType: "deployment.orchestration.retrying", Status: deployRetryingStatus, Timestamp: time.Now().UTC(), Metadata: map[string]any{"serviceId": request.ServiceID, "attempt": attempt, "errorMessage": err.Error()}}
 }
 
 func newDeploySucceededEvent(
@@ -84,7 +83,7 @@ func newDeploySucceededEvent(
 	target DeploymentTarget,
 ) ServiceEvent[DeploySucceededPayload] {
 	return ServiceEvent[DeploySucceededPayload]{
-		EventID:      deploymentEventID(request.DeploymentID, "orchestrate", runningStatus),
+		EventID:      deploymentEventID(request.DeploymentID, "orchestration", runningStatus),
 		EventType:    deploySucceededEventType,
 		Timestamp:    marshalTimestamp(time.Now().UTC()),
 		DeploymentID: request.DeploymentID,
@@ -110,7 +109,7 @@ func newDeployFailedEvent(
 	err error,
 ) ServiceEvent[DeployFailedPayload] {
 	return ServiceEvent[DeployFailedPayload]{
-		EventID:      deploymentEventID(request.DeploymentID, "orchestrate", deployFailedStatus),
+		EventID:      deploymentEventID(request.DeploymentID, "orchestration", deployFailedStatus),
 		EventType:    deployFailedEventType,
 		Timestamp:    marshalTimestamp(time.Now().UTC()),
 		DeploymentID: request.DeploymentID,
@@ -243,17 +242,4 @@ func marshalTimestamp(timestamp time.Time) json.RawMessage {
 		return json.RawMessage(`null`)
 	}
 	return json.RawMessage(payload)
-}
-
-func newEventID() string {
-	var randomBytes [16]byte
-	if _, err := rand.Read(randomBytes[:]); err != nil {
-		return time.Now().UTC().Format("20060102150405.000000000")
-	}
-
-	randomBytes[6] = (randomBytes[6] & 0x0f) | 0x40
-	randomBytes[8] = (randomBytes[8] & 0x3f) | 0x80
-
-	encoded := hex.EncodeToString(randomBytes[:])
-	return encoded[0:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:32]
 }

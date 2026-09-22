@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/util/retry"
 )
 
 type ownershipError struct{ message string }
@@ -66,8 +67,23 @@ func (k *KubernetesClient) ensureNamespace(ctx context.Context, namespace string
 		for key, value := range labels {
 			current.Labels[key] = value
 		}
-		_, err = namespaces.Update(ctx, current, metav1.UpdateOptions{})
-		return err
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest, err := namespaces.Get(ctx, namespace, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			if latest.Labels["shiply.io/managed-by"] != labels["shiply.io/managed-by"] || latest.Labels["shiply.io/project-id"] != labels["shiply.io/project-id"] {
+				return ownershipError{message: fmt.Sprintf("refusing to update namespace %s: ownership labels do not match request", namespace)}
+			}
+			if latest.Labels == nil {
+				latest.Labels = map[string]string{}
+			}
+			for key, value := range labels {
+				latest.Labels[key] = value
+			}
+			_, err = namespaces.Update(ctx, latest, metav1.UpdateOptions{})
+			return err
+		})
 	}
 	if !apierrors.IsNotFound(err) {
 		return err
@@ -101,13 +117,18 @@ func (k *KubernetesClient) ensureRegistryPullSecret(ctx context.Context, namespa
 	}
 
 	secrets := k.clientset.CoreV1().Secrets(namespace)
-	current, err := secrets.Get(ctx, k.cfg.ImagePullSecretName, metav1.GetOptions{})
+	_, err = secrets.Get(ctx, k.cfg.ImagePullSecretName, metav1.GetOptions{})
 	if err == nil {
-		current.Type = corev1.SecretTypeDockerConfigJson
-		current.Data = map[string][]byte{
-			corev1.DockerConfigJsonKey: payload,
-		}
-		_, err = secrets.Update(ctx, current, metav1.UpdateOptions{})
+		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest, err := secrets.Get(ctx, k.cfg.ImagePullSecretName, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			latest.Type = corev1.SecretTypeDockerConfigJson
+			latest.Data = map[string][]byte{corev1.DockerConfigJsonKey: payload}
+			_, err = secrets.Update(ctx, latest, metav1.UpdateOptions{})
+			return err
+		})
 		return k.cfg.ImagePullSecretName, err
 	}
 	if !apierrors.IsNotFound(err) {
@@ -200,11 +221,17 @@ func (k *KubernetesClient) ensureDeployment(
 		}
 	}
 
-	current, err := deployments.Get(ctx, target.DeploymentName, metav1.GetOptions{})
+	_, err = deployments.Get(ctx, target.DeploymentName, metav1.GetOptions{})
 	if err == nil {
-		desired.ResourceVersion = current.ResourceVersion
-		_, err = deployments.Update(ctx, desired, metav1.UpdateOptions{})
-		return err
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest, err := deployments.Get(ctx, target.DeploymentName, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			desired.ResourceVersion = latest.ResourceVersion
+			_, err = deployments.Update(ctx, desired, metav1.UpdateOptions{})
+			return err
+		})
 	}
 	if !apierrors.IsNotFound(err) {
 		return err
@@ -239,16 +266,22 @@ func (k *KubernetesClient) ensureService(ctx context.Context, target DeploymentT
 		},
 	}
 
-	current, err := services.Get(ctx, target.ServiceName, metav1.GetOptions{})
+	_, err := services.Get(ctx, target.ServiceName, metav1.GetOptions{})
 	if err == nil {
-		desired.ResourceVersion = current.ResourceVersion
-		desired.Spec.ClusterIP = current.Spec.ClusterIP
-		desired.Spec.ClusterIPs = current.Spec.ClusterIPs
-		desired.Spec.IPFamilies = current.Spec.IPFamilies
-		desired.Spec.IPFamilyPolicy = current.Spec.IPFamilyPolicy
-		desired.Spec.InternalTrafficPolicy = current.Spec.InternalTrafficPolicy
-		_, err = services.Update(ctx, desired, metav1.UpdateOptions{})
-		return err
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest, err := services.Get(ctx, target.ServiceName, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			desired.ResourceVersion = latest.ResourceVersion
+			desired.Spec.ClusterIP = latest.Spec.ClusterIP
+			desired.Spec.ClusterIPs = latest.Spec.ClusterIPs
+			desired.Spec.IPFamilies = latest.Spec.IPFamilies
+			desired.Spec.IPFamilyPolicy = latest.Spec.IPFamilyPolicy
+			desired.Spec.InternalTrafficPolicy = latest.Spec.InternalTrafficPolicy
+			_, err = services.Update(ctx, desired, metav1.UpdateOptions{})
+			return err
+		})
 	}
 	if !apierrors.IsNotFound(err) {
 		return err
@@ -303,11 +336,17 @@ func (k *KubernetesClient) ensureIngress(ctx context.Context, target DeploymentT
 		}
 	}
 
-	current, err := ingresses.Get(ctx, target.IngressName, metav1.GetOptions{})
+	_, err := ingresses.Get(ctx, target.IngressName, metav1.GetOptions{})
 	if err == nil {
-		desired.ResourceVersion = current.ResourceVersion
-		_, err = ingresses.Update(ctx, desired, metav1.UpdateOptions{})
-		return err
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latest, err := ingresses.Get(ctx, target.IngressName, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			desired.ResourceVersion = latest.ResourceVersion
+			_, err = ingresses.Update(ctx, desired, metav1.UpdateOptions{})
+			return err
+		})
 	}
 	if !apierrors.IsNotFound(err) {
 		return err

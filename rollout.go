@@ -102,6 +102,11 @@ func deploymentRolloutComplete(deployment *appsv1.Deployment) bool {
 }
 
 func isRetriableDeployError(err error) bool {
+	var ownerErr ownershipError
+	if errors.As(err, &ownerErr) {
+		return false
+	}
+
 	var timeoutErr rolloutTimeoutError
 	if errors.As(err, &timeoutErr) {
 		return false
