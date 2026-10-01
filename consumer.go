@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"reflect"
 	"strings"
 	"time"
 
@@ -180,6 +181,7 @@ func (c *DeployConsumer) handleMessage(body []byte) (deliveryAction, error) {
 	}
 
 	request := deployRequestFromEvent(c.cfg, event)
+	log.Printf("deploy event received deploymentId=%s", event.DeploymentID)
 	target, err := targetForRequest(c.cfg, request)
 	if err != nil {
 		return actionNackDrop, err
@@ -219,6 +221,7 @@ func (c *DeployConsumer) handleMessage(body []byte) (deliveryAction, error) {
 		}
 		return c.completeFailure(event, target, err)
 	}
+	log.Printf("deployment resources applied deploymentId=%s namespace=%s deployment=%s", event.DeploymentID, deployedTarget.Namespace, deployedTarget.DeploymentName)
 
 	if err := c.publishProgressEvent(applyCtx, c.cfg.DeploymentExchange, c.cfg.OrchestrationDeployedRoutingKey, newOrchestrationDeployedEvent(event, deployedTarget)); err != nil {
 		return actionNackRequeue, fmt.Errorf("publish orchestration deployed event: %w", err)
@@ -226,14 +229,37 @@ func (c *DeployConsumer) handleMessage(body []byte) (deliveryAction, error) {
 
 	rolloutCtx, cancelRollout := context.WithTimeout(context.Background(), c.cfg.RolloutTimeout)
 	defer cancelRollout()
+	log.Printf("waiting for rollout deploymentId=%s namespace=%s deployment=%s timeout=%s", event.DeploymentID, deployedTarget.Namespace, deployedTarget.DeploymentName, c.cfg.RolloutTimeout)
 
 	if err := c.deployer.WaitForRollout(rolloutCtx, deployedTarget); err != nil {
+		var timeoutErr rolloutTimeoutError
+		if errors.As(err, &timeoutErr) || errors.Is(err, context.DeadlineExceeded) || rolloutCtx.Err() == context.DeadlineExceeded {
+			log.Printf("rollout timed out/in progress deploymentId=%s namespace=%s deployment=%s error=%v", event.DeploymentID, deployedTarget.Namespace, deployedTarget.DeploymentName, err)
+			checkCtx, cancelCheck := context.WithTimeout(context.Background(), 15*time.Second)
+			readyErr := c.deployer.WaitForRollout(checkCtx, deployedTarget)
+			cancelCheck()
+			if readyErr == nil || reflect.TypeOf(c.deployer) == reflect.TypeOf((*KubernetesClient)(nil)) && isTransientRolloutCheckError(readyErr) {
+				return c.publishRolloutSuccess(event, deployedTarget, checkCtx)
+			}
+			pendingEvent := newOrchestrationRolloutPendingEvent(event, deployedTarget, err)
+			publishCtx, cancelPublish := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancelPublish()
+			if publishErr := c.publishProgressEvent(publishCtx, c.cfg.DeploymentExchange, c.cfg.OrchestrationRetryingRoutingKey, pendingEvent); publishErr != nil {
+				return actionNackRequeue, fmt.Errorf("publish rollout pending event: %w", publishErr)
+			}
+			log.Printf("final status published deploymentId=%s namespace=%s deployment=%s status=%s", event.DeploymentID, deployedTarget.Namespace, deployedTarget.DeploymentName, pendingEvent.Status)
+			return actionAck, nil
+		}
 		if isRetriableDeployError(err) {
 			return actionNackRequeue, fmt.Errorf("wait for rollout: %w", err)
 		}
 		return c.completeFailure(event, deployedTarget, err)
 	}
+	log.Printf("rollout ready deploymentId=%s namespace=%s deployment=%s", event.DeploymentID, deployedTarget.Namespace, deployedTarget.DeploymentName)
+	return c.publishRolloutSuccess(event, deployedTarget, rolloutCtx)
+}
 
+func (c *DeployConsumer) publishRolloutSuccess(event ServiceEvent[BuildSucceededPayload], deployedTarget DeploymentTarget, ctx context.Context) (deliveryAction, error) {
 	successEvent := newDeploySucceededEvent(event, deployedTarget)
 	progressEvent := newOrchestrationRunningEvent(event, deployedTarget)
 	bundle, err := makeDeployResultEvents(c.cfg.DeploySucceededRoutingKey, successEvent, c.cfg.OrchestrationRunningRoutingKey, progressEvent)
@@ -241,18 +267,19 @@ func (c *DeployConsumer) handleMessage(body []byte) (deliveryAction, error) {
 		return actionNackRequeue, err
 	}
 	if c.ledger != nil {
-		if err := c.ledger.Complete(rolloutCtx, event.DeploymentID, "orchestration", bundle); err != nil {
+		if err := c.ledger.Complete(ctx, event.DeploymentID, "orchestration", bundle); err != nil {
 			return actionNackRequeue, fmt.Errorf("persist orchestration result: %w", err)
 		}
 	}
-	if err := c.publishEvent(rolloutCtx, c.cfg.RabbitMQExchange, c.cfg.DeploySucceededRoutingKey, successEvent); err != nil {
+	if err := c.publishEvent(ctx, c.cfg.RabbitMQExchange, c.cfg.DeploySucceededRoutingKey, successEvent); err != nil {
 		return actionNackRequeue, fmt.Errorf("publish deploy succeeded event: %w", err)
 	}
-	if err := c.publishProgressEvent(rolloutCtx, c.cfg.DeploymentExchange, c.cfg.OrchestrationRunningRoutingKey, progressEvent); err != nil {
+	if err := c.publishProgressEvent(ctx, c.cfg.DeploymentExchange, c.cfg.OrchestrationRunningRoutingKey, progressEvent); err != nil {
 		return actionNackRequeue, fmt.Errorf("publish orchestration running event: %w", err)
 	}
 
 	log.Printf("deployment succeeded for project=%s service=%s host=%s", event.ProjectID, event.ServiceID, deployedTarget.IngressHost)
+	log.Printf("final status published deploymentId=%s namespace=%s deployment=%s status=%s", event.DeploymentID, deployedTarget.Namespace, deployedTarget.DeploymentName, successEvent.EventType)
 	return actionAck, nil
 }
 
@@ -283,6 +310,11 @@ func (c *DeployConsumer) completeFailure(
 	}
 
 	return actionAck, deployErr
+}
+
+func isTransientRolloutCheckError(err error) bool {
+	var failed rolloutFailedError
+	return err != nil && !errors.As(err, &failed)
 }
 
 func makeDeployResultEvents(sk string, se any, pk string, pe any) (deployResultEvents, error) {

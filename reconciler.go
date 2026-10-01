@@ -162,7 +162,7 @@ func (k *KubernetesClient) ensureDeployment(
 
 	replicas := k.cfg.DefaultReplicas
 	deployments := k.clientset.AppsV1().Deployments(target.Namespace)
-	progressDeadline := k.cfg.DeploymentProgressDeadline
+	progressDeadline := int32(1800)
 
 	desired := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{

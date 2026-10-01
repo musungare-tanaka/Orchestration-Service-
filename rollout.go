@@ -37,7 +37,11 @@ func (e rolloutFailedError) Error() string {
 }
 
 func (k *KubernetesClient) WaitForRollout(ctx context.Context, target DeploymentTarget) error {
-	ticker := time.NewTicker(k.cfg.RolloutPollInterval)
+	pollInterval := k.cfg.RolloutPollInterval
+	if pollInterval <= 0 {
+		pollInterval = time.Second
+	}
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	for {
@@ -52,8 +56,16 @@ func (k *KubernetesClient) WaitForRollout(ctx context.Context, target Deployment
 		if deploymentRolloutComplete(deployment) {
 			return nil
 		}
+		if ctx.Err() != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return rolloutTimeoutError{namespace: target.Namespace, deploymentName: target.DeploymentName}
+			}
+			return ctx.Err()
+		}
 
 		select {
+		case <-ticker.C:
+			continue
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				return rolloutTimeoutError{
@@ -62,7 +74,6 @@ func (k *KubernetesClient) WaitForRollout(ctx context.Context, target Deployment
 				}
 			}
 			return ctx.Err()
-		case <-ticker.C:
 		}
 	}
 }
@@ -95,12 +106,18 @@ func deploymentRolloutComplete(deployment *appsv1.Deployment) bool {
 		replicas = *deployment.Spec.Replicas
 	}
 
-	return deployment.Generation <= deployment.Status.ObservedGeneration &&
+	available := false
+	for _, condition := range deployment.Status.Conditions {
+		if condition.Type == appsv1.DeploymentAvailable && condition.Status == "True" {
+			available = true
+			break
+		}
+	}
+	return available && deployment.Generation <= deployment.Status.ObservedGeneration &&
 		deployment.Status.UpdatedReplicas == replicas &&
 		deployment.Status.Replicas == replicas &&
 		deployment.Status.AvailableReplicas == replicas
 }
-
 func isRetriableDeployError(err error) bool {
 	var ownerErr ownershipError
 	if errors.As(err, &ownerErr) {

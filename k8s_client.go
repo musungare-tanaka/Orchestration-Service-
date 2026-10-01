@@ -48,6 +48,8 @@ func NewKubernetesClientWithClientset(cfg Config, clientset kubernetes.Interface
 func kubeRESTConfig(cfg Config) (*rest.Config, error) {
 	inClusterConfig, err := rest.InClusterConfig()
 	if err == nil {
+		inClusterConfig.QPS = 50
+		inClusterConfig.Burst = 100
 		return inClusterConfig, nil
 	}
 
@@ -60,6 +62,8 @@ func kubeRESTConfig(cfg Config) (*rest.Config, error) {
 	if kubeconfigErr != nil {
 		return nil, fmt.Errorf("load kubernetes config: in-cluster=%v, kubeconfig=%w", err, kubeconfigErr)
 	}
+	restConfig.QPS = 50
+	restConfig.Burst = 100
 
 	return restConfig, nil
 }

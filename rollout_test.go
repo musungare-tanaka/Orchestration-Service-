@@ -20,6 +20,14 @@ func TestWaitForRolloutSucceeds(t *testing.T) {
 	clientset.PrependReactor("get", "deployments", func(_ k8stesting.Action) (bool, runtime.Object, error) {
 		callCount++
 		if callCount == 1 {
+			return true, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}, Spec: appsv1.DeploymentSpec{Replicas: int32Ptr(1)}}, nil
+		}
+		return true, &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}, Spec: appsv1.DeploymentSpec{Replicas: int32Ptr(1)}, Status: appsv1.DeploymentStatus{ObservedGeneration: 1, UpdatedReplicas: 1, Replicas: 1, AvailableReplicas: 1, Conditions: []appsv1.DeploymentCondition{{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue}}}}, nil
+	})
+	clientset.PrependReactor("list", "pods", func(_ k8stesting.Action) (bool, runtime.Object, error) { return true, &corev1.PodList{}, nil })
+	clientset.PrependReactor("get", "deployments", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		callCount++
+		if callCount == 1 {
 			return true, &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "app-api", Namespace: "shiply-prj-demo", Generation: 2},
 				Spec:       appsv1.DeploymentSpec{Replicas: int32Ptr(1)},
@@ -105,6 +113,42 @@ func TestWaitForRolloutFailsOnProgressDeadlineExceeded(t *testing.T) {
 	var failedErr rolloutFailedError
 	if !errors.As(err, &failedErr) {
 		t.Fatalf("expected rolloutFailedError, got %v", err)
+	}
+}
+
+func TestWaitForRolloutTimeoutThenReady(t *testing.T) {
+	clientset := fake.NewSimpleClientset(&appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "app-api", Namespace: "shiply-prj-demo", Generation: 1},
+		Spec:       appsv1.DeploymentSpec{Replicas: int32Ptr(1)},
+		Status:     appsv1.DeploymentStatus{ObservedGeneration: 1},
+	})
+	clientset.PrependReactor("list", "pods", func(_ k8stesting.Action) (bool, runtime.Object, error) { return true, &corev1.PodList{}, nil })
+	clientset.PrependReactor("list", "pods", func(_ k8stesting.Action) (bool, runtime.Object, error) { return true, &corev1.PodList{}, nil })
+	clientset.PrependReactor("list", "pods", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &corev1.PodList{}, nil
+	})
+	client := NewKubernetesClientWithClientset(Config{RolloutPollInterval: 5 * time.Millisecond}, clientset)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := client.WaitForRollout(ctx, DeploymentTarget{Namespace: "shiply-prj-demo", DeploymentName: "app-api"})
+	var timeoutErr rolloutTimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("expected timeout status, got %v", err)
+	}
+
+	deployment, err := clientset.AppsV1().Deployments("shiply-prj-demo").Get(context.Background(), "app-api", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployment.Status = appsv1.DeploymentStatus{
+		ObservedGeneration: 1, UpdatedReplicas: 1, Replicas: 1, AvailableReplicas: 1,
+		Conditions: []appsv1.DeploymentCondition{{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue}},
+	}
+	if _, err := clientset.AppsV1().Deployments("shiply-prj-demo").Update(context.Background(), deployment, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.WaitForRollout(context.Background(), DeploymentTarget{Namespace: "shiply-prj-demo", DeploymentName: "app-api"}); err != nil {
+		t.Fatalf("expected subsequent ready check to succeed, got %v", err)
 	}
 }
 

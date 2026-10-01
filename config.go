@@ -57,7 +57,7 @@ type Config struct {
 }
 
 func loadConfig() Config {
-	rolloutTimeout := envDurationOrDefault("K8S_ROLLOUT_TIMEOUT", 5*time.Minute)
+	rolloutTimeout := envDurationOrDefault("K8S_ROLLOUT_TIMEOUT", 20*time.Minute)
 
 	return Config{
 		HTTPPort:                        envOrDefault("PORT", "8082"),
@@ -90,7 +90,7 @@ func loadConfig() Config {
 		RolloutPollInterval:             envDurationOrDefault("K8S_ROLLOUT_POLL_INTERVAL", 5*time.Second),
 		ImagePullSecretName:             envOrDefault("K8S_IMAGE_PULL_SECRET_NAME", "shiply-registry"),
 		TLSSecretName:                   strings.TrimSpace(os.Getenv("K8S_TLS_SECRET_NAME")),
-		DeploymentProgressDeadline:      int32(maxInt64(int64(rolloutTimeout/time.Second), 60)),
+		DeploymentProgressDeadline:      1800,
 		ResourceDefaults: ResourceDefaults{
 			CPURequest:    envOrDefault("K8S_CPU_REQUEST", "100m"),
 			CPULimit:      envOrDefault("K8S_CPU_LIMIT", "500m"),

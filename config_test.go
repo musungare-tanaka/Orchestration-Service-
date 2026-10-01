@@ -24,8 +24,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.DefaultReplicas != 1 {
 		t.Fatalf("expected default replicas 1, got %d", cfg.DefaultReplicas)
 	}
-	if cfg.RolloutTimeout != 5*time.Minute {
-		t.Fatalf("expected default rollout timeout 5m, got %s", cfg.RolloutTimeout)
+	if cfg.RolloutTimeout != 20*time.Minute {
+		t.Fatalf("expected default rollout timeout 20m, got %s", cfg.RolloutTimeout)
 	}
 }
 

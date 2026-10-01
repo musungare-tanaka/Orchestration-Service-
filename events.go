@@ -20,6 +20,7 @@ const (
 	runningStatus                       = "RUNNING"
 	deployFailedStatus                  = "DEPLOY_FAILED"
 	deployRetryingStatus                = "DEPLOY_RETRYING"
+	deploymentOrchestrationRetryingType = "deployment.orchestration.retrying"
 )
 
 type ServiceEvent[T any] struct {
@@ -75,7 +76,16 @@ type DeployFailedPayload struct {
 }
 
 func newOrchestrationRetryingEvent(request ServiceEvent[BuildSucceededPayload], attempt int, err error) DeploymentEvent {
-	return DeploymentEvent{EventID: deploymentEventID(request.DeploymentID, "orchestration", fmt.Sprintf("%s:%d", deployRetryingStatus, attempt)), DeploymentID: request.DeploymentID, ProjectID: request.ProjectID, ServiceName: request.ServiceName, EventType: "deployment.orchestration.retrying", Status: deployRetryingStatus, Timestamp: time.Now().UTC(), Metadata: map[string]any{"serviceId": request.ServiceID, "attempt": attempt, "errorMessage": err.Error()}}
+	return DeploymentEvent{EventID: deploymentEventID(request.DeploymentID, "orchestration", fmt.Sprintf("%s:%d", deployRetryingStatus, attempt)), DeploymentID: request.DeploymentID, ProjectID: request.ProjectID, ServiceName: request.ServiceName, EventType: deploymentOrchestrationRetryingType, Status: deployRetryingStatus, Timestamp: time.Now().UTC(), Metadata: map[string]any{"serviceId": request.ServiceID, "attempt": attempt, "errorMessage": err.Error()}}
+}
+
+func newOrchestrationRolloutPendingEvent(request ServiceEvent[BuildSucceededPayload], target DeploymentTarget, err error) DeploymentEvent {
+	return DeploymentEvent{
+		EventID: deploymentEventID(request.DeploymentID, "orchestration", "ROLLOUT_PENDING"), DeploymentID: request.DeploymentID,
+		ProjectID: request.ProjectID, ServiceName: request.ServiceName, EventType: deploymentOrchestrationRetryingType,
+		Status: deployRetryingStatus, Timestamp: time.Now().UTC(),
+		Metadata: map[string]any{"serviceId": request.ServiceID, "namespace": target.Namespace, "deploymentName": target.DeploymentName, "errorMessage": err.Error()},
+	}
 }
 
 func newDeploySucceededEvent(
