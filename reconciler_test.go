@@ -2,15 +2,158 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 )
+
+func namespaceTestLabels(projectID, deploymentID string) map[string]string {
+	return map[string]string{
+		"shiply.io/managed-by":    "orchestration-service",
+		"shiply.io/project-id":    projectID,
+		"shiply.io/deployment-id": deploymentID,
+		"shiply.io/service-id":    "service-1",
+		"shiply.io/service-slug":  "api",
+	}
+}
+
+func assertNoNamespaceUpdateOrPatch(t *testing.T, clientset *fake.Clientset) {
+	t.Helper()
+	for _, action := range clientset.Actions() {
+		if action.GetResource().Resource == "namespaces" && (action.GetVerb() == "update" || action.GetVerb() == "patch") {
+			t.Errorf("unexpected namespace update action: %s", action.GetVerb())
+		}
+	}
+}
+
+func TestEnsureNamespaceCreatesOnlyOwnershipLabels(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	client := NewKubernetesClientWithClientset(Config{}, clientset)
+	labels := namespaceTestLabels("project-1", "deploy-1")
+	if err := client.ensureNamespace(context.Background(), "shiply-prj-demo", labels); err != nil {
+		t.Fatalf("ensureNamespace returned error: %v", err)
+	}
+	created, err := clientset.CoreV1().Namespaces().Get(context.Background(), "shiply-prj-demo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get created namespace: %v", err)
+	}
+	want := map[string]string{"shiply.io/managed-by": "orchestration-service", "shiply.io/project-id": "project-1"}
+	if !equalStringMaps(created.Labels, want) {
+		t.Fatalf("namespace labels = %#v, want %#v", created.Labels, want)
+	}
+	assertNamespaceActions(t, clientset, []string{"get", "create", "get"})
+}
+
+func TestEnsureNamespaceMatchingOwnershipDoesNotWrite(t *testing.T) {
+	labels := namespaceTestLabels("project-1", "new-deploy")
+	clientset := fake.NewSimpleClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shiply-prj-demo", Labels: map[string]string{
+		"shiply.io/managed-by": "orchestration-service", "shiply.io/project-id": "project-1", "shiply.io/deployment-id": "old-deploy",
+	}}})
+	client := NewKubernetesClientWithClientset(Config{}, clientset)
+	if err := client.ensureNamespace(context.Background(), "shiply-prj-demo", labels); err != nil {
+		t.Fatalf("ensureNamespace returned error: %v", err)
+	}
+	assertNamespaceActions(t, clientset, []string{"get"})
+}
+
+func TestEnsureNamespaceMismatchedOwnershipDoesNotWrite(t *testing.T) {
+	clientset := fake.NewSimpleClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shiply-prj-demo", Labels: map[string]string{
+		"shiply.io/managed-by": "orchestration-service", "shiply.io/project-id": "other-project",
+	}}})
+	client := NewKubernetesClientWithClientset(Config{}, clientset)
+	err := client.ensureNamespace(context.Background(), "shiply-prj-demo", namespaceTestLabels("project-1", "deploy-1"))
+	var ownerErr ownershipError
+	if !errors.As(err, &ownerErr) {
+		t.Fatalf("expected ownershipError, got %v", err)
+	}
+	assertNamespaceActions(t, clientset, []string{"get"})
+}
+
+func TestEnsureNamespaceAlreadyExistsRaceChecksOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		projectID string
+		wantErr   bool
+	}{
+		{name: "matching", projectID: "project-1"},
+		{name: "mismatched", projectID: "other-project", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clientset := fake.NewSimpleClientset()
+			var getCalls int
+			clientset.PrependReactor("*", "*", func(action ktesting.Action) (bool, runtime.Object, error) {
+				if action.GetResource().Resource != "namespaces" {
+					return false, nil, nil
+				}
+				switch action.GetVerb() {
+				case "get":
+					getCalls++
+					if getCalls == 1 {
+						return true, nil, apierrors.NewNotFound(corev1.Resource("namespaces"), "shiply-prj-demo")
+					}
+					return true, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "shiply-prj-demo", Labels: map[string]string{
+						"shiply.io/managed-by": "orchestration-service", "shiply.io/project-id": tc.projectID,
+					}}}, nil
+				case "create":
+					return true, nil, apierrors.NewAlreadyExists(corev1.Resource("namespaces"), "shiply-prj-demo")
+				default:
+					return false, nil, nil
+				}
+			})
+			client := NewKubernetesClientWithClientset(Config{}, clientset)
+			err := client.ensureNamespace(context.Background(), "shiply-prj-demo", namespaceTestLabels("project-1", "deploy-1"))
+			if tc.wantErr {
+				var ownerErr ownershipError
+				if !errors.As(err, &ownerErr) {
+					t.Fatalf("expected ownershipError, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("ensureNamespace returned error: %v", err)
+			}
+			assertNamespaceActions(t, clientset, []string{"get", "create", "get"})
+		})
+	}
+}
+
+func assertNamespaceActions(t *testing.T, clientset *fake.Clientset, wantVerbs []string) {
+	t.Helper()
+	var got []string
+	for _, action := range clientset.Actions() {
+		if action.GetResource().Resource != "namespaces" {
+			continue
+		}
+		got = append(got, action.GetVerb())
+	}
+	if len(got) != len(wantVerbs) {
+		t.Fatalf("namespace actions = %v, want %v", got, wantVerbs)
+	}
+	for i := range got {
+		if got[i] != wantVerbs[i] {
+			t.Fatalf("namespace actions = %v, want %v", got, wantVerbs)
+		}
+	}
+	assertNoNamespaceUpdateOrPatch(t, clientset)
+}
+
+func equalStringMaps(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if b[key] != value {
+			return false
+		}
+	}
+	return true
+}
 
 func TestDeployCreatesNamespaceWorkloadServiceIngressAndSecret(t *testing.T) {
 	cfg := Config{

@@ -58,44 +58,39 @@ func (k *KubernetesClient) ensureNamespace(ctx context.Context, namespace string
 
 	current, err := namespaces.Get(ctx, namespace, metav1.GetOptions{})
 	if err == nil {
-		if current.Labels["shiply.io/managed-by"] != labels["shiply.io/managed-by"] || current.Labels["shiply.io/project-id"] != labels["shiply.io/project-id"] {
-			return ownershipError{message: fmt.Sprintf("refusing to update namespace %s: ownership labels do not match request", namespace)}
-		}
-		if current.Labels == nil {
-			current.Labels = map[string]string{}
-		}
-		for key, value := range labels {
-			current.Labels[key] = value
-		}
-		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			latest, err := namespaces.Get(ctx, namespace, metav1.GetOptions{})
-			if err != nil {
-				return err
-			}
-			if latest.Labels["shiply.io/managed-by"] != labels["shiply.io/managed-by"] || latest.Labels["shiply.io/project-id"] != labels["shiply.io/project-id"] {
-				return ownershipError{message: fmt.Sprintf("refusing to update namespace %s: ownership labels do not match request", namespace)}
-			}
-			if latest.Labels == nil {
-				latest.Labels = map[string]string{}
-			}
-			for key, value := range labels {
-				latest.Labels[key] = value
-			}
-			_, err = namespaces.Update(ctx, latest, metav1.UpdateOptions{})
-			return err
-		})
+		return checkNamespaceOwnership(current, namespace, labels)
 	}
 	if !apierrors.IsNotFound(err) {
-		return err
+		return fmt.Errorf("get namespace %s: %w", namespace, err)
 	}
 
 	_, err = namespaces.Create(ctx, &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   namespace,
-			Labels: cloneLabels(labels),
+			Name: namespace,
+			Labels: map[string]string{
+				"shiply.io/managed-by": labels["shiply.io/managed-by"],
+				"shiply.io/project-id": labels["shiply.io/project-id"],
+			},
 		},
 	}, metav1.CreateOptions{})
-	return err
+	if apierrors.IsAlreadyExists(err) {
+		current, getErr := namespaces.Get(ctx, namespace, metav1.GetOptions{})
+		if getErr != nil {
+			return fmt.Errorf("get namespace %s after create race: %w", namespace, getErr)
+		}
+		return checkNamespaceOwnership(current, namespace, labels)
+	}
+	if err != nil {
+		return fmt.Errorf("create namespace %s: %w", namespace, err)
+	}
+	return nil
+}
+
+func checkNamespaceOwnership(namespaceObject *corev1.Namespace, namespace string, labels map[string]string) error {
+	if namespaceObject.Labels["shiply.io/managed-by"] != labels["shiply.io/managed-by"] || namespaceObject.Labels["shiply.io/project-id"] != labels["shiply.io/project-id"] {
+		return ownershipError{message: fmt.Sprintf("refusing to update namespace %s: ownership labels do not match request", namespace)}
+	}
+	return nil
 }
 
 func (k *KubernetesClient) ensureRegistryPullSecret(ctx context.Context, namespace string) (string, error) {

@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestration-service
+  namespace: shiply
+spec:
+  selector:
+    matchLabels:
+      app: orchestration-service
+  template:
+    metadata:
+      labels:
+        app: orchestration-service
+    spec:
+      serviceAccountName: orchestration-service
+      containers:
+        - name: orchestration-service
+          image: orchestration-service:v4
+          imagePullPolicy: Never

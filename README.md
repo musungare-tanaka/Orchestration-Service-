@@ -47,3 +47,13 @@
 - Creates one namespace per project using `shiply-prj-<project-slug>`.
 - Exposes apps through a standard Kubernetes `Ingress` using the host pattern `<service-slug>-<project-slug>.<PLATFORM_BASE_DOMAIN>`.
 - Leaves failed workloads in place for inspection; later deploys update them in place.
+
+## Build and deploy v4
+
+The deployment on the server should use `imagePullPolicy: Never` after importing the image locally:
+
+```sh
+docker build -t orchestration-service:v4 .
+docker save orchestration-service:v4 | k3s ctr images import -
+kubectl set image deploy/orchestration-service -n shiply '*=orchestration-service:v4'
+```
