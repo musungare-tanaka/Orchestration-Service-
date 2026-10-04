@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"maps"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -144,7 +145,7 @@ func TestEnsureNamespaceCreatesOnlyOwnershipLabels(t *testing.T) {
 		t.Fatalf("get created namespace: %v", err)
 	}
 	want := map[string]string{"shiply.io/managed-by": "orchestration-service", "shiply.io/project-id": "project-1"}
-	if !equalStringMaps(created.Labels, want) {
+	if !maps.Equal(created.Labels, want) {
 		t.Fatalf("namespace labels = %#v, want %#v", created.Labels, want)
 	}
 	assertNamespaceActions(t, clientset, []string{"get", "create", "get"})
@@ -239,18 +240,6 @@ func assertNamespaceActions(t *testing.T, clientset *fake.Clientset, wantVerbs [
 		}
 	}
 	assertNoNamespaceUpdateOrPatch(t, clientset)
-}
-
-func equalStringMaps(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for key, value := range a {
-		if b[key] != value {
-			return false
-		}
-	}
-	return true
 }
 
 func TestDeployCreatesNamespaceWorkloadServiceIngressAndSecret(t *testing.T) {

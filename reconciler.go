@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"strings"
 	"time"
 
@@ -221,7 +222,14 @@ func (k *KubernetesClient) ensureDeployment(
 
 	existing, err := deployments.Get(ctx, target.DeploymentName, metav1.GetOptions{})
 	if err == nil {
-		if existing.Spec.Selector == nil || !equalStringMaps(existing.Spec.Selector.MatchLabels, desired.Spec.Selector.MatchLabels) {
+		var existingMatchLabels, desiredMatchLabels map[string]string
+		if existing.Spec.Selector != nil {
+			existingMatchLabels = existing.Spec.Selector.MatchLabels
+		}
+		if desired.Spec.Selector != nil {
+			desiredMatchLabels = desired.Spec.Selector.MatchLabels
+		}
+		if !maps.Equal(existingMatchLabels, desiredMatchLabels) {
 			return k.recreateDeployment(ctx, deployments, existing, desired, request.ServiceID, target.DeploymentName)
 		}
 		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
