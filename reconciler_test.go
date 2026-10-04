@@ -11,9 +11,107 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 )
+
+func TestEnsureDeploymentSelectorUnchangedUpdates(t *testing.T) {
+	clientset := fake.NewSimpleClientset(testDeployment("service-1"))
+	client := NewKubernetesClientWithClientset(testDeploymentConfig(), clientset)
+	if err := client.ensureDeployment(context.Background(), testDeployRequest("service-1"), testDeploymentTarget(), labelsForRequest(testDeployRequest("service-1")), ""); err != nil {
+		t.Fatalf("ensureDeployment returned error: %v", err)
+	}
+	assertDeploymentActions(t, clientset, []string{"get", "get", "update"})
+}
+
+func TestEnsureDeploymentSelectorChangedDeletesThenCreates(t *testing.T) {
+	clientset := fake.NewSimpleClientset(testDeployment("old-service"))
+	client := NewKubernetesClientWithClientset(testDeploymentConfig(), clientset)
+	request := testDeployRequest("new-service")
+	if err := client.ensureDeployment(context.Background(), request, testDeploymentTarget(), labelsForRequest(request), ""); err != nil {
+		t.Fatalf("ensureDeployment returned error: %v", err)
+	}
+	assertDeploymentActions(t, clientset, []string{"get", "delete", "get", "create"})
+	got, err := clientset.AppsV1().Deployments("shiply-prj-demo").Get(context.Background(), "app-api", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get recreated deployment: %v", err)
+	}
+	if got.Spec.Selector.MatchLabels["shiply.io/service-id"] != "new-service" {
+		t.Fatalf("recreated selector = %#v", got.Spec.Selector.MatchLabels)
+	}
+}
+
+func TestEnsureDeploymentNotFoundCreates(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	client := NewKubernetesClientWithClientset(testDeploymentConfig(), clientset)
+	request := testDeployRequest("service-1")
+	if err := client.ensureDeployment(context.Background(), request, testDeploymentTarget(), labelsForRequest(request), ""); err != nil {
+		t.Fatalf("ensureDeployment returned error: %v", err)
+	}
+	assertDeploymentActions(t, clientset, []string{"get", "create"})
+}
+
+func TestEnsureDeploymentDeleteFailureIsReturned(t *testing.T) {
+	clientset := fake.NewSimpleClientset(testDeployment("old-service"))
+	wantErr := errors.New("delete rejected")
+	clientset.PrependReactor("delete", "deployments", func(ktesting.Action) (bool, runtime.Object, error) { return true, nil, wantErr })
+	client := NewKubernetesClientWithClientset(testDeploymentConfig(), clientset)
+	request := testDeployRequest("new-service")
+	if err := client.ensureDeployment(context.Background(), request, testDeploymentTarget(), labelsForRequest(request), ""); !errors.Is(err, wantErr) {
+		t.Fatalf("ensureDeployment error = %v, want %v", err, wantErr)
+	}
+	assertDeploymentActions(t, clientset, []string{"get", "delete"})
+}
+
+func TestEnsureDeploymentInvalidSelectorUpdateFallsBackOnce(t *testing.T) {
+	clientset := fake.NewSimpleClientset(testDeployment("service-1"))
+	clientset.PrependReactor("update", "deployments", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewInvalid(appsv1.SchemeGroupVersion.WithKind("Deployment").GroupKind(), "app-api", field.ErrorList{field.Invalid(field.NewPath("spec", "selector"), nil, "field is immutable")})
+	})
+	client := NewKubernetesClientWithClientset(testDeploymentConfig(), clientset)
+	request := testDeployRequest("service-1")
+	if err := client.ensureDeployment(context.Background(), request, testDeploymentTarget(), labelsForRequest(request), ""); err != nil {
+		t.Fatalf("ensureDeployment returned error: %v", err)
+	}
+	assertDeploymentActions(t, clientset, []string{"get", "get", "update", "delete", "get", "create"})
+}
+
+func testDeployment(serviceID string) *appsv1.Deployment {
+	return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "app-api", Namespace: "shiply-prj-demo"}, Spec: appsv1.DeploymentSpec{
+		Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"shiply.io/service-id": serviceID}},
+	}}
+}
+
+func testDeploymentConfig() Config {
+	return Config{DefaultReplicas: 1, ResourceDefaults: ResourceDefaults{CPURequest: "100m", CPULimit: "500m", MemoryRequest: "128Mi", MemoryLimit: "512Mi"}}
+}
+
+func testDeployRequest(serviceID string) DeployRequest {
+	return DeployRequest{ProjectID: "project-1", ServiceID: serviceID, ProjectSlug: "demo", ServiceSlug: "api", ImageTag: "example/image:latest", ContainerPort: 8080}
+}
+
+func testDeploymentTarget() DeploymentTarget {
+	return DeploymentTarget{Namespace: "shiply-prj-demo", DeploymentName: "app-api", ContainerPort: 8080}
+}
+
+func assertDeploymentActions(t *testing.T, clientset *fake.Clientset, want []string) {
+	t.Helper()
+	var got []string
+	for _, action := range clientset.Actions() {
+		if action.GetResource().Resource == "deployments" {
+			got = append(got, action.GetVerb())
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("deployment actions = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("deployment actions = %v, want %v", got, want)
+		}
+	}
+}
 
 func namespaceTestLabels(projectID, deploymentID string) map[string]string {
 	return map[string]string{

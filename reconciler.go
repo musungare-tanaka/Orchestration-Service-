@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -14,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	appsv1client "k8s.io/client-go/kubernetes/typed/apps/v1"
 	"k8s.io/client-go/util/retry"
 )
 
@@ -216,8 +219,11 @@ func (k *KubernetesClient) ensureDeployment(
 		}
 	}
 
-	_, err = deployments.Get(ctx, target.DeploymentName, metav1.GetOptions{})
+	existing, err := deployments.Get(ctx, target.DeploymentName, metav1.GetOptions{})
 	if err == nil {
+		if existing.Spec.Selector == nil || !equalStringMaps(existing.Spec.Selector.MatchLabels, desired.Spec.Selector.MatchLabels) {
+			return k.recreateDeployment(ctx, deployments, existing, desired, request.ServiceID, target.DeploymentName)
+		}
 		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			latest, err := deployments.Get(ctx, target.DeploymentName, metav1.GetOptions{})
 			if err != nil {
@@ -225,6 +231,9 @@ func (k *KubernetesClient) ensureDeployment(
 			}
 			desired.ResourceVersion = latest.ResourceVersion
 			_, err = deployments.Update(ctx, desired, metav1.UpdateOptions{})
+			if apierrors.IsInvalid(err) && strings.Contains(strings.ToLower(err.Error()), "selector") {
+				return k.recreateDeployment(ctx, deployments, latest, desired, request.ServiceID, target.DeploymentName)
+			}
 			return err
 		})
 	}
@@ -233,6 +242,46 @@ func (k *KubernetesClient) ensureDeployment(
 	}
 
 	_, err = deployments.Create(ctx, desired, metav1.CreateOptions{})
+	return err
+}
+
+func (k *KubernetesClient) recreateDeployment(
+	ctx context.Context,
+	deployments appsv1client.DeploymentInterface,
+	existing, desired *appsv1.Deployment,
+	newServiceID, deploymentName string,
+) error {
+	oldServiceID := ""
+	if existing.Spec.Selector != nil {
+		oldServiceID = existing.Spec.Selector.MatchLabels["shiply.io/service-id"]
+	}
+	log.Printf("recreating deployment for changed service selector oldServiceID=%s newServiceID=%s deployment=%s", oldServiceID, newServiceID, deploymentName)
+	propagation := metav1.DeletePropagationForeground
+	if err := deployments.Delete(ctx, deploymentName, metav1.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete deployment %s for selector change: %w", deploymentName, err)
+	}
+
+	deadline := time.NewTimer(60 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		_, err := deployments.Get(ctx, deploymentName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("wait for deployment %s deletion: %w", deploymentName, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for deployment %s deletion", deploymentName)
+		case <-ticker.C:
+		}
+	}
+	_, err := deployments.Create(ctx, desired, metav1.CreateOptions{})
 	return err
 }
 
