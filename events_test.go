@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 func TestNewDeploySucceededEvent(t *testing.T) {
 	event := newDeploySucceededEvent(
@@ -58,6 +62,17 @@ func TestNewDeployFailedEvent(t *testing.T) {
 	}
 	if event.Payload.ErrorMessage != "rollout failed" {
 		t.Fatalf("unexpected error message %q", event.Payload.ErrorMessage)
+	}
+}
+
+func TestDeployFailedMessageSanitizesAndTruncates(t *testing.T) {
+	message := string([]byte{'b', 'a', 'd', 0xff}) + strings.Repeat("x", 2100)
+	event := newDeployFailedEvent(ServiceEvent[BuildSucceededPayload]{}, DeploymentTarget{}, errTest(message))
+	if !utf8.ValidString(event.Payload.ErrorMessage) {
+		t.Fatal("failure message is not valid UTF-8")
+	}
+	if got := len([]rune(event.Payload.ErrorMessage)); got != 2000 {
+		t.Fatalf("failure message length = %d runes, want 2000", got)
 	}
 }
 

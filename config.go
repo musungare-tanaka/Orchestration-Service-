@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+const defaultAppContainerPort int32 = 3000
+
 type RegistryConfig struct {
 	Host     string
 	Username string
@@ -85,7 +87,7 @@ func loadConfig() Config {
 		IngressClassName:                envOrDefault("K8S_INGRESS_CLASS", "traefik"),
 		NamespacePrefix:                 envOrDefault("K8S_NAMESPACE_PREFIX", "shiply-prj"),
 		DefaultReplicas:                 envInt32OrDefault("K8S_DEFAULT_REPLICAS", 1),
-		DefaultContainerPort:            envInt32OrDefault("K8S_CONTAINER_PORT_DEFAULT", 8080),
+		DefaultContainerPort:            envInt32OrDefault("APP_CONTAINER_PORT", defaultAppContainerPort),
 		RolloutTimeout:                  rolloutTimeout,
 		RolloutPollInterval:             envDurationOrDefault("K8S_ROLLOUT_POLL_INTERVAL", 5*time.Second),
 		ImagePullSecretName:             envOrDefault("K8S_IMAGE_PULL_SECRET_NAME", "shiply-registry"),

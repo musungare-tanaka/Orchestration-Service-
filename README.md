@@ -24,7 +24,7 @@
 - `K8S_INGRESS_CLASS=traefik`
 - `K8S_NAMESPACE_PREFIX=shiply-prj`
 - `K8S_DEFAULT_REPLICAS=1`
-- `K8S_CONTAINER_PORT_DEFAULT=8080`
+- `APP_CONTAINER_PORT=3000`
 - `K8S_ROLLOUT_TIMEOUT=5m`
 - `K8S_ROLLOUT_POLL_INTERVAL=5s`
 - `K8S_CPU_REQUEST=100m`
@@ -48,12 +48,12 @@
 - Exposes apps through a standard Kubernetes `Ingress` using the host pattern `<service-slug>-<project-slug>.<PLATFORM_BASE_DOMAIN>`.
 - Leaves failed workloads in place for inspection; later deploys update them in place.
 
-## Build and deploy v4
+## Build and deploy v6
 
 The deployment on the server should use `imagePullPolicy: Never` after importing the image locally:
 
 ```sh
-docker build -t orchestration-service:v4 .
-docker save orchestration-service:v4 | k3s ctr images import -
-kubectl set image deploy/orchestration-service -n shiply '*=orchestration-service:v4'
+docker build -t orchestration-service:v6 .
+docker save orchestration-service:v6 | k3s ctr images import -
+kubectl set image deploy/orchestration-service -n shiply '*=orchestration-service:v6'
 ```

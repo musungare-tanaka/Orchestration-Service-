@@ -302,6 +302,19 @@ func TestDeployCreatesNamespaceWorkloadServiceIngressAndSecret(t *testing.T) {
 	if deployment.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort != 8080 {
 		t.Fatalf("unexpected container port %d", deployment.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort)
 	}
+	container := deployment.Spec.Template.Spec.Containers[0]
+	if got := envValue(container.Env, "PORT"); got != "8080" {
+		t.Fatalf("PORT = %q, want 8080", got)
+	}
+	if got := envValue(container.Env, "SERVER_PORT"); got != "8080" {
+		t.Fatalf("SERVER_PORT = %q, want 8080", got)
+	}
+	if container.ReadinessProbe == nil || container.ReadinessProbe.TCPSocket == nil || container.ReadinessProbe.TCPSocket.Port.IntVal != 8080 || container.ReadinessProbe.PeriodSeconds != 5 || container.ReadinessProbe.FailureThreshold != 3 {
+		t.Fatalf("unexpected readiness probe: %#v", container.ReadinessProbe)
+	}
+	if container.StartupProbe == nil || container.StartupProbe.TCPSocket == nil || container.StartupProbe.TCPSocket.Port.IntVal != 8080 || container.StartupProbe.PeriodSeconds != 5 || container.StartupProbe.FailureThreshold != 60 {
+		t.Fatalf("unexpected startup probe: %#v", container.StartupProbe)
+	}
 	if len(deployment.Spec.Template.Spec.ImagePullSecrets) != 1 || deployment.Spec.Template.Spec.ImagePullSecrets[0].Name != "shiply-registry" {
 		t.Fatalf("expected image pull secret attachment, got %#v", deployment.Spec.Template.Spec.ImagePullSecrets)
 	}
@@ -321,6 +334,56 @@ func TestDeployCreatesNamespaceWorkloadServiceIngressAndSecret(t *testing.T) {
 	if ingress.Spec.Rules[0].Host != "api-demo.apps.shiply.test" {
 		t.Fatalf("unexpected ingress host %q", ingress.Spec.Rules[0].Host)
 	}
+	if ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port.Number != 80 {
+		t.Fatalf("unexpected ingress backend service port %d", ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Port.Number)
+	}
+}
+
+func envValue(env []corev1.EnvVar, name string) string {
+	for _, value := range env {
+		if value.Name == name {
+			return value.Value
+		}
+	}
+	return ""
+}
+
+func TestPlatformPortOverridesUserEnvAndFlowsThroughResources(t *testing.T) {
+	cfg := testDeploymentConfig()
+	cfg.DefaultContainerPort = 4567
+	cfg.BaseDomain = "apps.shiply.test"
+	cfg.NamespacePrefix = "shiply-prj"
+	cfg.IngressClassName = "traefik"
+	request := testDeployRequest("service-1")
+	request.Environment = []corev1.EnvVar{{Name: "PORT", Value: "5000"}, {Name: "SERVER_PORT", Value: "8080"}, {Name: "CUSTOM", Value: "kept"}}
+	request.ContainerPort = cfg.DefaultContainerPort
+	client := NewKubernetesClientWithClientset(cfg, fake.NewSimpleClientset())
+	target, err := client.Deploy(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Deploy returned error: %v", err)
+	}
+	container, err := getDeployedContainer(client, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if container.Ports[0].ContainerPort != 4567 || envValue(container.Env, "PORT") != "4567" || envValue(container.Env, "SERVER_PORT") != "4567" || envValue(container.Env, "CUSTOM") != "kept" {
+		t.Fatalf("platform port/env mismatch: %#v", container)
+	}
+	service, _ := client.clientset.CoreV1().Services(target.Namespace).Get(context.Background(), target.ServiceName, metav1.GetOptions{})
+	if service.Spec.Ports[0].TargetPort.IntVal != 4567 {
+		t.Fatalf("service targetPort = %d, want 4567", service.Spec.Ports[0].TargetPort.IntVal)
+	}
+	if target.ContainerPort != 4567 {
+		t.Fatalf("target port = %d, want 4567", target.ContainerPort)
+	}
+}
+
+func getDeployedContainer(client *KubernetesClient, target DeploymentTarget) (corev1.Container, error) {
+	deployment, err := client.clientset.AppsV1().Deployments(target.Namespace).Get(context.Background(), target.DeploymentName, metav1.GetOptions{})
+	if err != nil {
+		return corev1.Container{}, err
+	}
+	return deployment.Spec.Template.Spec.Containers[0], nil
 }
 
 func TestDeployUpdatesExistingResourcesIdempotently(t *testing.T) {

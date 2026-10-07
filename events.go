@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -134,9 +135,18 @@ func newDeployFailedEvent(
 			DeploymentName: target.DeploymentName,
 			IngressHost:    target.IngressHost,
 			ContainerPort:  target.ContainerPort,
-			ErrorMessage:   err.Error(),
+			ErrorMessage:   sanitizeFailureMessage(err.Error()),
 		},
 	}
+}
+
+func sanitizeFailureMessage(message string) string {
+	message = strings.ToValidUTF8(message, "�")
+	runes := []rune(message)
+	if len(runes) > 2000 {
+		runes = runes[:2000]
+	}
+	return string(runes)
 }
 
 func newOrchestrationStartedEvent(

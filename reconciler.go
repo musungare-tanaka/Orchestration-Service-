@@ -200,11 +200,17 @@ func (k *KubernetesClient) ensureDeployment(
 									ContainerPort: target.ContainerPort,
 								},
 							},
-							Env: []corev1.EnvVar{
-								{
-									Name:  "PORT",
-									Value: fmt.Sprintf("%d", target.ContainerPort),
-								},
+							Env: platformPortEnv(request, target.ContainerPort),
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler:        corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(target.ContainerPort)}},
+								PeriodSeconds:       5,
+								FailureThreshold:    3,
+								InitialDelaySeconds: 0,
+							},
+							StartupProbe: &corev1.Probe{
+								ProbeHandler:     corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(target.ContainerPort)}},
+								PeriodSeconds:    5,
+								FailureThreshold: 60,
 							},
 							Resources: resources,
 						},
@@ -251,6 +257,28 @@ func (k *KubernetesClient) ensureDeployment(
 
 	_, err = deployments.Create(ctx, desired, metav1.CreateOptions{})
 	return err
+}
+
+func platformPortEnv(request DeployRequest, port int32) []corev1.EnvVar {
+	platformValue := fmt.Sprintf("%d", port)
+	userEnv := request.Environment
+	result := make([]corev1.EnvVar, 0, len(userEnv)+2)
+	seen := map[string]bool{}
+	for _, variable := range userEnv {
+		if variable.Name == "PORT" || variable.Name == "SERVER_PORT" {
+			log.Printf("warning: overriding user-defined %s with platform container port %s", variable.Name, platformValue)
+			continue
+		}
+		if seen[variable.Name] {
+			continue
+		}
+		seen[variable.Name] = true
+		result = append(result, variable)
+	}
+	return append(result,
+		corev1.EnvVar{Name: "PORT", Value: platformValue},
+		corev1.EnvVar{Name: "SERVER_PORT", Value: platformValue},
+	)
 }
 
 func (k *KubernetesClient) recreateDeployment(

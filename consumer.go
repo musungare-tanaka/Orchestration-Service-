@@ -253,6 +253,10 @@ func (c *DeployConsumer) handleMessage(body []byte) (deliveryAction, error) {
 		if isRetriableDeployError(err) {
 			return actionNackRequeue, fmt.Errorf("wait for rollout: %w", err)
 		}
+		var failedErr rolloutFailedError
+		if errors.As(err, &timeoutErr) || errors.As(err, &failedErr) {
+			err = fmt.Errorf("app did not become ready on port %d; ensure it listens on $PORT: %w", deployedTarget.ContainerPort, err)
+		}
 		return c.completeFailure(event, deployedTarget, err)
 	}
 	log.Printf("rollout ready deploymentId=%s namespace=%s deployment=%s", event.DeploymentID, deployedTarget.Namespace, deployedTarget.DeploymentName)

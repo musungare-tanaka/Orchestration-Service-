@@ -15,5 +15,5 @@ spec:
       serviceAccountName: orchestration-service
       containers:
         - name: orchestration-service
-          image: orchestration-service:v4
+          image: orchestration-service:v6
           imagePullPolicy: Never

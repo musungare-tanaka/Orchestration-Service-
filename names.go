@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 type DeploymentTarget struct {
@@ -23,15 +25,16 @@ type DeployRequest struct {
 	DeploymentID  string
 	ImageTag      string
 	CommitSHA     string
+	Environment   []corev1.EnvVar
 	ProjectSlug   string
 	ServiceSlug   string
 	ContainerPort int32
 }
 
 func deployRequestFromEvent(cfg Config, event ServiceEvent[BuildSucceededPayload]) DeployRequest {
-	port := event.Payload.ContainerPort
+	port := cfg.DefaultContainerPort
 	if port <= 0 {
-		port = cfg.DefaultContainerPort
+		port = defaultAppContainerPort
 	}
 
 	return DeployRequest{

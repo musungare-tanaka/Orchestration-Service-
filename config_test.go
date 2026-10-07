@@ -12,6 +12,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 	t.Setenv("PLATFORM_BASE_DOMAIN", "")
 	t.Setenv("K8S_DEFAULT_REPLICAS", "")
 	t.Setenv("K8S_ROLLOUT_TIMEOUT", "")
+	t.Setenv("APP_CONTAINER_PORT", "")
 
 	cfg := loadConfig()
 
@@ -27,6 +28,9 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.RolloutTimeout != 20*time.Minute {
 		t.Fatalf("expected default rollout timeout 20m, got %s", cfg.RolloutTimeout)
 	}
+	if cfg.DefaultContainerPort != defaultAppContainerPort {
+		t.Fatalf("expected default app container port %d, got %d", defaultAppContainerPort, cfg.DefaultContainerPort)
+	}
 }
 
 func TestLoadConfigEnvOverrides(t *testing.T) {
@@ -34,7 +38,7 @@ func TestLoadConfigEnvOverrides(t *testing.T) {
 	t.Setenv("RABBITMQ_APP_DEPLOY_QUEUE", "custom.deploy.queue")
 	t.Setenv("PLATFORM_BASE_DOMAIN", "apps.shiply.test")
 	t.Setenv("K8S_DEFAULT_REPLICAS", "3")
-	t.Setenv("K8S_CONTAINER_PORT_DEFAULT", "9000")
+	t.Setenv("APP_CONTAINER_PORT", "9000")
 	t.Setenv("K8S_ROLLOUT_TIMEOUT", "90s")
 
 	cfg := loadConfig()
@@ -56,5 +60,12 @@ func TestLoadConfigEnvOverrides(t *testing.T) {
 	}
 	if cfg.RolloutTimeout != 90*time.Second {
 		t.Fatalf("expected rollout timeout 90s, got %s", cfg.RolloutTimeout)
+	}
+}
+
+func TestLoadConfigAppContainerPortOverride(t *testing.T) {
+	t.Setenv("APP_CONTAINER_PORT", "4567")
+	if got := loadConfig().DefaultContainerPort; got != 4567 {
+		t.Fatalf("app container port = %d, want 4567", got)
 	}
 }
